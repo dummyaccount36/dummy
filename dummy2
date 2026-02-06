@@ -60,3 +60,31 @@ sales_key_2025 = (
     .agg(pl.col("so_nw_ct").sum().alias("sales_2025"))
     .sort("sales_2025", descending=True)
 )
+
+
+total_sales = sales_key_2025.select(
+    pl.col("sales_2025").sum()
+).item()
+
+sales_key_2025 = sales_key_2025.with_columns(
+    cumsum = pl.col("sales_2025").cum_sum(),
+    cumsum_pct = pl.col("sales_2025").cum_sum() / total_sales
+)
+
+
+pareto80_df = sales_key_2025.filter(
+    pl.col("cumsum_pct") <= 0.80
+).select("key")
+
+
+pareto70_df = sales_key_2025.filter(
+    pl.col("cumsum_pct") <= 0.70
+).select("key")
+
+
+
+perform_df = perform_df.with_columns(
+    pareto70_flag = pl.when(
+        pl.col("key").is_in(pareto70_df["key"])
+    ).then(1).otherwise(0)
+)
