@@ -186,3 +186,31 @@ zone_summary = (
         pareto_jump = pl.col("pareto80_count") - pl.col("pareto70_count")
     )
 ).sort("zone")
+
+
+
+pareto_class_df = (
+    sales_2025_df
+    .with_columns(
+        pareto_class = pl.when(pl.col("cumsum_pct") < 0.8)
+                          .then(pl.lit("Core"))
+                          .otherwise(pl.lit("Tail"))
+    )
+    .select("key", "pareto_class")
+)
+
+
+pareto_class_df.head(10)
+
+
+perform_df = (
+    perform_df
+    .join(pareto_class_df, on="key", how="left")
+)
+
+perform_df.select("key", "pareto_class").head(10)
+
+
+perform_df.group_by("pareto_class").agg(
+    count = pl.count()
+)
