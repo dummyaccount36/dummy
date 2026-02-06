@@ -248,3 +248,51 @@ zone_core_only.head(3)
 
 zone_core_only.sort("avg_mape", descending=True).head(3)
 
+
+
+error_candidates = (
+    perform_df
+    .filter(
+        (pl.col("mape_avg") < 0.9) &   # exclude 100% / extreme
+        (pl.col("mape_avg") >= 0.3)    # keep meaningfully bad errors
+    )
+    .select("key", "zone", "mape_avg", "pareto_class")
+)
+
+
+core_error_candidates = (
+    error_candidates
+    .filter(pl.col("pareto_class") == "Core")
+)
+
+
+zone_worst_combinations = (
+    core_error_candidates
+    .group_by("zone")
+    .agg(
+        avg_mape = (pl.col("mape_avg").mean() * 100).round(2),
+        comb_count = pl.count()
+    )
+    .sort("avg_mape", descending=True)
+)
+
+zone_worst_combinations
+
+
+zone_02b_worst = (
+    core_error_candidates
+    .filter(pl.col("zone") == "ZONE02B")
+    .sort("mape_avg", descending=True)
+)
+
+n_02b = zone_02b_worst.height
+
+if n_02b <= 2:
+    zone_02b_focus = zone_02b_worst.head(9)
+elif n_02b <= 4:
+    zone_02b_focus = zone_02b_worst.head(6)
+else:
+    zone_02b_focus = zone_02b_worst.head(3)
+
+zone_02b_focus
+
