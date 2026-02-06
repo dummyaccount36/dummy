@@ -134,4 +134,41 @@ print(sel)
 
 # Plot the special selection keys
 if len(sel)>0:
+
   plot_key_trends(sel['key'].tolist())
+
+
+
+
+
+
+ma_df = (
+    so_fcst_df
+    .with_columns(
+        pl.col("so_nw_ct").shift(3).alias("m-0"),
+        pl.col("so_nw_ct").shift(4).alias("m-1"),
+        pl.col("so_nw_ct").shift(5).alias("m-2"),
+    )
+    .filter(pl.col("periods") >= "2023 01")
+    .with_columns(
+        ma3 = (pl.col("m-0") + pl.col("m-1") + pl.col("m-2")) / 3
+    )
+    .with_columns(
+        re = pl.col("ma3") - pl.col("so_nw_ct"),
+        ae = (pl.col("ma3") - pl.col("so_nw_ct")).abs()
+    )
+    .with_columns(
+        mape = pl.when(pl.col("so_nw_ct") > 0)
+                 .then(pl.col("ae") / pl.col("so_nw_ct"))
+                 .otherwise(1)
+    )
+    .with_columns(
+        mape = pl.when(pl.col("mape") > 1).then(1).otherwise(pl.col("mape"))
+    )
+)
+
+# Evaluation window
+eval_df = ma_df.filter(
+    (pl.col("periods") >= "2025 07") &
+    (pl.col("periods") <= "2025 12")
+)
