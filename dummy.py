@@ -172,3 +172,37 @@ eval_df = ma_df.filter(
     (pl.col("periods") >= "2025 07") &
     (pl.col("periods") <= "2025 12")
 )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+eval_perf = (
+    eval_df
+    .pivot(
+        on="periods",
+        index="key",
+        values="mape",
+        aggregate_function="sum",
+        sort_columns=True
+    )
+    .with_columns(
+        mape_avg = pl.mean_horizontal(pl.exclude("key"))
+    )
+)
+
+
