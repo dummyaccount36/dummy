@@ -296,3 +296,32 @@ else:
 
 zone_02b_focus
 
+
+
+
+zone_core_count = (
+    perform_df
+    .filter(pl.col("pareto_class") == "Core")
+    .group_by("zone")
+    .agg(core_comb_count = pl.count())
+    .sort("core_comb_count", descending=True)
+)
+
+zone_core_count
+
+
+
+zone_core_sales = (
+    so_fcst_df
+    .filter(
+        pl.col("periods").str.contains("2025") &
+        pl.col("key").is_in(
+            pareto_class_df.filter(pl.col("pareto_class") == "Core")["key"]
+        )
+    )
+    .group_by("zone")
+    .agg(core_sales = pl.col("so_nw_ct").sum())
+    .sort("core_sales", descending=True)
+)
+
+zone_core_sales
