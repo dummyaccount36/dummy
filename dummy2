@@ -100,3 +100,16 @@ pareto70_df = (
     .filter(pl.col("cumsum_pct") <= 0.7)
     .select("key")
 )
+
+
+sales_2025_df = (
+    so_fcst_df
+    .filter(pl.col("periods").str.contains("2025"))
+    .group_by("key")
+    .agg(
+        pl.col("so_nw_ct").sum().alias("sales_2025")
+    )
+)
+
+sales_2025_df.head()
+
