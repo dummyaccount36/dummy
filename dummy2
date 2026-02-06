@@ -88,3 +88,15 @@ perform_df = perform_df.with_columns(
         pl.col("key").is_in(pareto70_df["key"])
     ).then(1).otherwise(0)
 )
+
+
+pareto70_df = (
+    sales_2025_df
+    .sort("sales_2025", descending=True)
+    .with_columns(
+        cumsum = pl.col("sales_2025").cum_sum(),
+        cumsum_pct = pl.col("sales_2025").cum_sum() / pl.col("sales_2025").sum()
+    )
+    .filter(pl.col("cumsum_pct") <= 0.7)
+    .select("key")
+)
