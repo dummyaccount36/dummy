@@ -71,3 +71,33 @@ print(
     (pareto70_df["sales_2025"].sum() / sales_2025_df["sales_2025"].sum()).round(3)
 )
 
+
+
+
+perform_df = perform_df.with_columns(
+    pareto80_flag = pl.when(pl.col("key").is_in(pareto80_df["key"]))
+        .then(1)
+        .otherwise(0)
+)
+
+
+perform_df = perform_df.with_columns(
+    pareto70_flag = pl.when(pl.col("key").is_in(pareto70_df["key"]))
+        .then(1)
+        .otherwise(0)
+)
+
+
+
+perform_df.select(
+    pl.col("pareto80_flag").sum().alias("pareto80_count"),
+    pl.col("pareto70_flag").sum().alias("pareto70_count"),
+    pl.len().alias("total_rows")
+)
+
+
+perform_df.group_by("zone").agg(
+    pl.col("pareto80_flag").sum().alias("pareto80_count"),
+    pl.col("pareto70_flag").sum().alias("pareto70_count"),
+    pl.len().alias("total_combinations")
+).sort("zone")
