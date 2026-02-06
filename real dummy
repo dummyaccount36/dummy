@@ -31,3 +31,43 @@ print("Pareto 80 sales share:",
 
 print("Pareto 70 sales share:",
       (pareto70_df["sales_2025"].sum() / sales_2025_df["sales_2025"].sum()).round(3))
+
+
+
+
+pareto80_df = sales_2025_df.filter(pl.col("cumsum_pct") < 0.8)
+pareto70_df = sales_2025_df.filter(pl.col("cumsum_pct") < 0.7)
+
+
+print("Pareto 80 sales share:",
+      (pareto80_df["sales_2025"].sum() / sales_2025_df["sales_2025"].sum()).round(3))
+
+print("Pareto 70 sales share:",
+      (pareto70_df["sales_2025"].sum() / sales_2025_df["sales_2025"].sum()).round(3))
+
+
+pareto80_df = (
+    sales_2025_df
+    .filter(pl.col("cumsum_pct") < 0.8)
+    .select("key", "sales_2025", "cumsum_pct")
+)
+
+pareto70_df = (
+    sales_2025_df
+    .filter(pl.col("cumsum_pct") < 0.7)
+    .select("key", "sales_2025", "cumsum_pct")
+)
+
+print("Pareto 80 count:", pareto80_df.height)
+print("Pareto 70 count:", pareto70_df.height)
+
+print(
+    "Pareto 80 sales share:",
+    (pareto80_df["sales_2025"].sum() / sales_2025_df["sales_2025"].sum()).round(3)
+)
+
+print(
+    "Pareto 70 sales share:",
+    (pareto70_df["sales_2025"].sum() / sales_2025_df["sales_2025"].sum()).round(3)
+)
+
