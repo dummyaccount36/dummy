@@ -1,0 +1,53 @@
+perform_df = perform_df.with_columns(
+    pareto70_flag = pl.when(
+        pl.col("key").is_in(pareto70_df["key"])
+    ).then(1).otherwise(0)
+)
+
+
+rank_df = perform_df.filter(
+    (pl.col("mape_avg") < 0.9) &   # exclude 100% & extreme
+    (pl.col("mape_avg") > 0)       # sanity
+)
+
+worst_zone_p80 = (
+    rank_df
+    .filter(pl.col("pareto80_flag") == 1)
+    .group_by("zone")
+    .agg(pl.col("mape_avg").mean().alias("zone_mape"))
+    .sort("zone_mape", descending=True)
+    .head(1)
+)
+
+worst_zone_name = worst_zone_p80.select("zone").item()
+
+top3_worst_p80 = (
+    rank_df
+    .filter(
+        (pl.col("zone") == worst_zone_name) &
+        (pl.col("pareto80_flag") == 1)
+    )
+    .sort("mape_avg", descending=True)
+    .head(3)
+)
+
+best_zone_p80 = (
+    rank_df
+    .filter(pl.col("pareto80_flag") == 1)
+    .group_by("zone")
+    .agg(pl.col("mape_avg").mean().alias("zone_mape"))
+    .sort("zone_mape")   # ascending = best
+    .head(1)
+)
+
+best_zone_name = best_zone_p80.select("zone").item()
+
+top3_best_p80 = (
+    rank_df
+    .filter(
+        (pl.col("zone") == best_zone_name) &
+        (pl.col("pareto80_flag") == 1)
+    )
+    .sort("mape_avg")   # smallest error
+    .head(3)
+)
