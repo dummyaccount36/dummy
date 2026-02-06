@@ -1,0 +1,33 @@
+sales_2025_df = (
+    so_fcst_df
+    .filter(pl.col("periods").str.contains("2025"))
+    .group_by("key")
+    .agg(pl.col("so_nw_ct").sum().alias("sales_2025"))
+    .sort("sales_2025", descending=True)
+)
+
+sales_2025_df = sales_2025_df.with_columns(
+    cumsum_sales = pl.col("sales_2025").cum_sum(),
+    cumsum_pct = pl.col("cumsum_sales") / pl.col("sales_2025").sum()
+)
+
+pareto80_df = (
+    sales_2025_df
+    .filter(pl.col("cumsum_pct") < 0.8)
+    .select("key", "sales_2025", "cumsum_pct")
+)
+
+pareto70_df = (
+    sales_2025_df
+    .filter(pl.col("cumsum_pct") < 0.7)
+    .select("key", "sales_2025", "cumsum_pct")
+)
+
+print("Pareto 80 count:", pareto80_df.height)
+print("Pareto 70 count:", pareto70_df.height)
+
+print("Pareto 80 sales share:",
+      (pareto80_df["sales_2025"].sum() / sales_2025_df["sales_2025"].sum()).round(3))
+
+print("Pareto 70 sales share:",
+      (pareto70_df["sales_2025"].sum() / sales_2025_df["sales_2025"].sum()).round(3))
