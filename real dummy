@@ -214,3 +214,37 @@ perform_df.select("key", "pareto_class").head(10)
 perform_df.group_by("pareto_class").agg(
     count = pl.count()
 )
+
+
+
+
+
+zone_core_tail_perf = (
+    perform_df
+    .filter(pl.col("mape_avg") < 1)   # keep valid MAPE only
+    .group_by(["zone", "pareto_class"])
+    .agg(
+        avg_mape = (pl.col("mape_avg").mean() * 100).round(2),
+        comb_count = pl.count()
+    )
+    .sort(["zone", "pareto_class"])
+)
+
+zone_core_tail_perf
+
+
+
+zone_core_only = (
+    zone_core_tail_perf
+    .filter(pl.col("pareto_class") == "Core")
+    .select("zone", "avg_mape", "comb_count")
+    .sort("avg_mape")
+)
+
+zone_core_only
+
+
+zone_core_only.head(3)
+
+zone_core_only.sort("avg_mape", descending=True).head(3)
+
