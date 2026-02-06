@@ -51,3 +51,12 @@ top3_best_p80 = (
     .sort("mape_avg")   # smallest error
     .head(3)
 )
+
+
+sales_key_2025 = (
+    so_fcst_df
+    .filter(pl.col("periods").str.contains("2025"))
+    .group_by("key")
+    .agg(pl.col("so_nw_ct").sum().alias("sales_2025"))
+    .sort("sales_2025", descending=True)
+)
