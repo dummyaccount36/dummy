@@ -145,7 +145,44 @@ zone_summary = (
 )
 
 
+zone_summary
+
 zone_summary.sort("pareto_jump", descending=True).head(5)
 
-
 zone_summary.sort("pareto_jump").head(5)
+
+
+# Pareto 70 count per zone
+pareto70_zone = (
+    sales_2025_df
+    .filter(pl.col("cumsum_pct") < 0.7)
+    .group_by("zone")
+    .agg(pl.count().alias("pareto70_count"))
+)
+
+# Pareto 80 count per zone
+pareto80_zone = (
+    sales_2025_df
+    .filter(pl.col("cumsum_pct") < 0.8)
+    .group_by("zone")
+    .agg(pl.count().alias("pareto80_count"))
+)
+
+# Total combinations per zone
+total_combo_zone = (
+    sales_2025_df
+    .group_by("zone")
+    .agg(pl.count().alias("total_combinations"))
+)
+
+
+zone_summary = (
+    total_combo_zone
+    .join(pareto70_zone, on="zone", how="left")
+    .join(pareto80_zone, on="zone", how="left")
+    .with_columns(
+        pareto70_pct = (pl.col("pareto70_count") / pl.col("total_combinations")).round(4),
+        pareto80_pct = (pl.col("pareto80_count") / pl.col("total_combinations")).round(4),
+        pareto_jump = pl.col("pareto80_count") - pl.col("pareto70_count")
+    )
+).sort("zone")
