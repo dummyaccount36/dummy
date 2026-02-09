@@ -1,0 +1,151 @@
+# Block 1: determine best & worst zones (core MAPE)
+# Ensure zone_core_only exists; if not, build from zone_core_tail_perf (which you should have)
+if "zone_core_only" not in globals():
+    # Rebuild zone_core_only if needed (will use zone_core_tail_perf)
+    try:
+        zone_core_only = (
+            zone_core_tail_perf
+            .filter(pl.col("pareto_class") == "Core")
+            .select("zone", "avg_mape", "comb_count")
+            .sort("avg_mape")
+        )
+    except NameError:
+        raise RuntimeError("zone_core_tail_perf not found — run prior cells that compute zone_core_tail_perf first.")
+
+# Pick best and worst (by avg_mape on Core)
+best_zone = zone_core_only.head(1)["zone"].item()
+worst_zone = zone_core_only.sort("avg_mape", descending=True).head(1)["zone"].item()
+
+print(f"Selected best_zone = {best_zone}")
+print(f"Selected worst_zone = {worst_zone}")
+
+# Show the Core MAPE values for context
+print("\nBest zone (core):")
+print(zone_core_only.head(3))
+
+print("\nWorst zone (core):")
+print(zone_core_only.sort("avg_mape", descending=True).head(3))
+
+
+
+
+
+
+import matplotlib.pyplot as plt
+import pandas as pd
+
+def plot_zone_top3(zone_name):
+    # top-3 Pareto combos in that zone by sales_2025
+    top3 = (
+        sales_2025_df
+        .filter(pl.col("zone") == zone_name)
+        .sort("sales_2025", descending=True)
+        .head(3)
+    )
+    if top3.height == 0:
+        print(f"No Pareto combos found for zone {zone_name}")
+        return
+    top3_pd = top3.to_pandas()
+
+    # 1) Bar plot of their 2025 sales
+    plt.figure(figsize=(7,4))
+    plt.bar(top3_pd["key"], top3_pd["sales_2025"])
+    plt.title(f"Top 3 Pareto combos by sales (2025) — {zone_name}")
+    plt.ylabel("Sales 2025")
+    plt.xticks(rotation=25)
+    plt.tight_layout()
+    plt.show()
+
+    # 2) Monthly time-series for each top3 key (use so_fcst_df)
+    ts_df = (
+        so_fcst_df
+        .filter(pl.col("key").is_in(top3_pd["key"].tolist()))
+        .select(["periods", "key", "so_nw_ct"])
+        .sort(["key", "periods"])
+    ).to_pandas()
+
+    # convert periods "YYYY MM" to datelike (first day of month)
+    ts_df["period_dt"] = pd.to_datetime(ts_df["periods"].str.replace(" ", "-") + "-01", format="%Y-%m-%d")
+
+    plt.figure(figsize=(10,4))
+    for k in top3_pd["key"]:
+        sub = ts_df[ts_df["key"] == k]
+        plt.plot(sub["period_dt"], sub["so_nw_ct"], marker='o', label=k)
+    plt.title(f"Monthly Sell-Out (so_nw_ct) — Top 3 combos in {zone_name}")
+    plt.ylabel("so_nw_ct")
+    plt.xlabel("Period")
+    plt.xticks(rotation=30)
+    plt.legend(title="key")
+    plt.tight_layout()
+    plt.show()
+
+# Run for worst and best zones
+plot_zone_top3(worst_zone)
+plot_zone_top3(best_zone)
+
+
+
+
+import matplotlib.pyplot as plt
+import pandas as pd
+
+# If zone_02b_focus doesn't exist (maybe you didn't run the special logic), recompute it:
+if "zone_02b_focus" not in globals():
+    # recompute core_error_candidates and zone_02b_worst if necessary
+    core_error_candidates = (
+        perform_df
+        .filter((pl.col("mape_avg") < 0.9) & (pl.col("mape_avg") >= 0.3) & (pl.col("pareto_class") == "Core"))
+        .select("key", "zone", "mape_avg", "pareto_class")
+    )
+    zone_02b_worst = core_error_candidates.filter(pl.col("zone") == "ZONE02B").sort("mape_avg", descending=True)
+    n_02b = zone_02b_worst.height
+    if n_02b <= 2:
+        zone_02b_focus = zone_02b_worst.head(9)
+    elif n_02b <= 4:
+        zone_02b_focus = zone_02b_worst.head(6)
+    else:
+        zone_02b_focus = zone_02b_worst.head(3)
+
+# Convert to pandas
+z02b_pd = zone_02b_focus.to_pandas()
+if z02b_pd.shape[0] == 0:
+    print("No zone_02b_focus combos found.")
+else:
+    # Bar plot of sales_2025 for these keys (join with sales_2025_df to get sales)
+    sales_join = (
+        sales_2025_df
+        .filter(pl.col("key").is_in(z02b_pd["key"].tolist()))
+        .select(["key", "sales_2025"])
+    ).to_pandas()
+
+    # Ensure order matches mape sorting
+    sales_join = sales_join.set_index("key").loc[z02b_pd["key"].tolist()].reset_index()
+
+    plt.figure(figsize=(8,4))
+    plt.bar(sales_join["key"], sales_join["sales_2025"])
+    plt.title("ZONE02B — Selected worst combos (sales_2025)")
+    plt.ylabel("Sales 2025")
+    plt.xticks(rotation=30)
+    plt.tight_layout()
+    plt.show()
+
+    # Plot monthly time series for these keys
+    ts_df = (
+        so_fcst_df
+        .filter(pl.col("key").is_in(z02b_pd["key"].tolist()))
+        .select(["periods", "key", "so_nw_ct"])
+        .sort(["key", "periods"])
+    ).to_pandas()
+    ts_df["period_dt"] = pd.to_datetime(ts_df["periods"].str.replace(" ", "-") + "-01", format="%Y-%m-%d")
+
+    plt.figure(figsize=(10,4))
+    for k in z02b_pd["key"].tolist():
+        sub = ts_df[ts_df["key"] == k]
+        plt.plot(sub["period_dt"], sub["so_nw_ct"], marker='o', label=k)
+    plt.title("ZONE02B — Monthly Sell-Out for selected worst combos")
+    plt.ylabel("so_nw_ct")
+    plt.xlabel("Period")
+    plt.xticks(rotation=30)
+    plt.legend(title="key", bbox_to_anchor=(1.02, 1), loc='upper left')
+    plt.tight_layout()
+    plt.show()
