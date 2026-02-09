@@ -1,30 +1,69 @@
-# Block 1: determine best & worst zones (core MAPE)
-# Ensure zone_core_only exists; if not, build from zone_core_tail_perf (which you should have)
-if "zone_core_only" not in globals():
-    # Rebuild zone_core_only if needed (will use zone_core_tail_perf)
-    try:
-        zone_core_only = (
-            zone_core_tail_perf
-            .filter(pl.col("pareto_class") == "Core")
-            .select("zone", "avg_mape", "comb_count")
-            .sort("avg_mape")
-        )
-    except NameError:
-        raise RuntimeError("zone_core_tail_perf not found — run prior cells that compute zone_core_tail_perf first.")
+best_zones = zone_core_only.head(3)["zone"].to_list()
 
-# Pick best and worst (by avg_mape on Core)
-best_zone = zone_core_only.head(1)["zone"].item()
-worst_zone = zone_core_only.sort("avg_mape", descending=True).head(1)["zone"].item()
+worst_zones = (
+    zone_core_only
+    .sort("avg_mape", descending=True)
+    .head(3)["zone"]
+    .to_list()
+)
 
-print(f"Selected best_zone = {best_zone}")
-print(f"Selected worst_zone = {worst_zone}")
+best_zone_trend = (
+    so_fcst_df
+    .filter(
+        pl.col("periods").str.contains("2025") &
+        pl.col("zone").is_in(best_zones)
+    )
+    .group_by(["zone", "periods"])
+    .agg(monthly_sales = pl.col("so_nw_ct").sum())
+    .sort(["zone", "periods"])
+)
 
-# Show the Core MAPE values for context
-print("\nBest zone (core):")
-print(zone_core_only.head(3))
 
-print("\nWorst zone (core):")
-print(zone_core_only.sort("avg_mape", descending=True).head(3))
+worst_zone_trend = (
+    so_fcst_df
+    .filter(
+        pl.col("periods").str.contains("2025") &
+        pl.col("zone").is_in(worst_zones)
+    )
+    .group_by(["zone", "periods"])
+    .agg(monthly_sales = pl.col("so_nw_ct").sum())
+    .sort(["zone", "periods"])
+)
+
+
+best_zone_trend_pd = best_zone_trend.to_pandas()
+worst_zone_trend_pd = worst_zone_trend.to_pandas()
+
+
+import matplotlib.pyplot as plt
+
+plt.figure(figsize=(10, 6))
+
+for zone in best_zone_trend_pd["zone"].unique():
+    df_zone = best_zone_trend_pd[best_zone_trend_pd["zone"] == zone]
+    plt.plot(df_zone["periods"], df_zone["monthly_sales"], marker="o", label=zone)
+
+plt.title("Monthly Sell-Out Trend (Top 3 Best Zones)")
+plt.xlabel("Period")
+plt.ylabel("Sell-Out (so_nw_ct)")
+plt.legend()
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(10, 6))
+
+for zone in worst_zone_trend_pd["zone"].unique():
+    df_zone = worst_zone_trend_pd[worst_zone_trend_pd["zone"] == zone]
+    plt.plot(df_zone["periods"], df_zone["monthly_sales"], marker="o", label=zone)
+
+plt.title("Monthly Sell-Out Trend (Top 3 Worst Zones)")
+plt.xlabel("Period")
+plt.ylabel("Sell-Out (so_nw_ct)")
+plt.legend()
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()
 
 
 
