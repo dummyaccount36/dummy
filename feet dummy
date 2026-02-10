@@ -140,6 +140,11 @@ summary = summary.with_columns(
 summary_pd = summary.to_pandas()
 display(summary_pd)
 
+# Also keep the Polars frames in memory under model-feature names (optional)
+globals()[f"rs_with_error_{MODEL_LABEL}_{FEATURE_NAME}"] = rs_with_error_df
+globals()[f"perform_{MODEL_LABEL}_{FEATURE_NAME}"] = perform_df
+
+
 
 
 # read all saved perform files and concat
@@ -169,6 +174,4 @@ display(report_all)
 print("Saved final report to:", os.path.join(RESULTS_DIR, "final_model_feature_report.csv"))
 
 
-# Also keep the Polars frames in memory under model-feature names (optional)
-globals()[f"rs_with_error_{MODEL_LABEL}_{FEATURE_NAME}"] = rs_with_error_df
-globals()[f"perform_{MODEL_LABEL}_{FEATURE_NAME}"] = perform_df
+
