@@ -8,6 +8,11 @@ print(f"[LR | {FEATURE_NAME}] Forecasting finished at:",
       pd.to_datetime("now").strftime("%Y-%m-%d %H:%M:%S"))
 
 
+train_xy = pd.concat([X_train, y_train], axis=1).dropna()
+X_train = train_xy.drop("so_nw_ct", axis=1)
+y_train = train_xy["so_nw_ct"]
+
+
 
 # base train_df in Polars (same as your Block M before zone split)
 train_df_base = so_fcst_df[[ "zone", "key", "periods", "so_nw_ct" ]].with_columns(
