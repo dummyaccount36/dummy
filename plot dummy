@@ -228,3 +228,44 @@ for key in top3_worst_keys:
     plt.tight_layout()
     plt.show()
 
+
+
+
+
+import polars as pl
+
+perform_lr = pl.read_csv("perform_lr.csv").with_columns(
+    pl.lit("LinearRegression").alias("model")
+)
+
+perform_rf = pl.read_csv("perform_rf.csv").with_columns(
+    pl.lit("RandomForest").alias("model")
+)
+
+
+perform_all = pl.concat([perform_lr, perform_rf])
+
+
+perform_all.group_by("model").agg(
+    pl.col("mape_avg").mean().round(3).alias("avg_mape")
+)
+
+
+pareto_compare = perform_all.group_by(
+    ["model", "pareto80_flag"]
+).agg(
+    pl.col("mape_avg").mean().round(3).alias("avg_mape"),
+    pl.count().alias("combination_count")
+).sort(["model", "pareto80_flag"])
+
+pareto_compare
+
+
+zone_compare = perform_all.group_by(
+    ["zone", "model", "pareto80_flag"]
+).agg(
+    pl.col("mape_avg").mean().round(3).alias("avg_mape"),
+    pl.count().alias("comb_count")
+).sort(["zone", "model", "pareto80_flag"])
+
+zone_compare
