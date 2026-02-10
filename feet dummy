@@ -1,6 +1,13 @@
 RESULTS_DIR = "results"
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
+print(f"[LR | {FEATURE_NAME}] Forecasting started at:",
+      pd.to_datetime("now").strftime("%Y-%m-%d %H:%M:%S"))
+
+print(f"[LR | {FEATURE_NAME}] Forecasting finished at:",
+      pd.to_datetime("now").strftime("%Y-%m-%d %H:%M:%S"))
+
+
 
 # base train_df in Polars (same as your Block M before zone split)
 train_df_base = so_fcst_df[[ "zone", "key", "periods", "so_nw_ct" ]].with_columns(
