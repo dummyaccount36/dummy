@@ -188,3 +188,43 @@ else:
     plt.legend(title="key", bbox_to_anchor=(1.02, 1), loc='upper left')
     plt.tight_layout()
     plt.show()
+
+
+
+top3_worst_keys = worst_zone_trend_pd.iloc[:3]["key"].to_list()
+
+mape_lookup = (
+    perform_df
+    .filter(pl.col("key").is_in(top3_worst_keys))
+    .select("key", "mape_avg")
+    .to_pandas()
+    .set_index("key")["mape_avg"]
+    .to_dict()
+)
+
+
+import matplotlib.pyplot as plt
+
+for key in top3_worst_keys:
+
+    df_key = (
+        so_fcst_df
+        .filter(pl.col("key") == key)
+        .sort("periods")
+        .to_pandas()
+    )
+
+    avg_mape_pct = round(mape_lookup.get(key, float("nan")) * 100, 2)
+
+    plt.figure(figsize=(9, 5))
+    plt.plot(df_key["periods"], df_key["so_nw_ct"], marker="o")
+    plt.title(
+        f"Worst Zone – {key}\n"
+        f"MA(3) Average MAPE: {avg_mape_pct}%"
+    )
+    plt.xlabel("Period")
+    plt.ylabel("Sell-Out (so_nw_ct)")
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
+
