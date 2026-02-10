@@ -1,0 +1,161 @@
+RESULTS_DIR = "results"
+os.makedirs(RESULTS_DIR, exist_ok=True)
+
+
+# base train_df in Polars (same as your Block M before zone split)
+train_df_base = so_fcst_df[[ "zone", "key", "periods", "so_nw_ct" ]].with_columns(
+    pl.col("so_nw_ct").shift(3).alias("m-0"),
+    pl.col("so_nw_ct").shift(4).alias("m-1"),
+    pl.col("so_nw_ct").shift(5).alias("m-2"),
+).filter(pl.col("periods") >= "2023 01").with_columns(
+    ma3=(pl.col("m-0")+pl.col("m-1")+pl.col("m-2"))/3
+)
+
+
+
+# Feature set 1: baseline (what you used)
+train_feat_baseline = train_df_base
+
+# Feature set 2: add extra lags + ma6
+train_feat_lags_ma6 = train_df_base.with_columns(
+    pl.col("so_nw_ct").shift(6).alias("m-3"),
+    pl.col("so_nw_ct").shift(7).alias("m-4"),
+    pl.col("so_nw_ct").shift(8).alias("m-5"),
+).with_columns(
+    ma6=(pl.col("m-0")+pl.col("m-1")+pl.col("m-2")+pl.col("m-3")+pl.col("m-4")+pl.col("m-5"))/6
+)
+
+# Feature set 3: add simple seasonal + trend (month sin/cos, period_index)
+# We'll parse periods "YYYY MM" to a date and extract month and index
+train_feat_season_trend = train_df_base.with_columns(
+    period_dt = pl.col("periods").str.strptime(pl.Date, fmt="%Y %m"),
+)
+train_feat_season_trend = train_feat_season_trend.with_columns(
+    month = pl.col("period_dt").dt.month().cast(pl.Int32),
+    period_index = pl.col("periods").apply(lambda s: int(s.replace(" ", ""))).cast(pl.Int64)  # simple numeric index
+)
+# month_sin / month_cos using Python math via apply (safe)
+train_feat_season_trend = train_feat_season_trend.with_columns(
+    pl.col("month").apply(lambda m: math.sin(2*math.pi*m/12)).alias("month_sin"),
+    pl.col("month").apply(lambda m: math.cos(2*math.pi*m/12)).alias("month_cos")
+)
+
+# Feature set 4: combined (lags + ma6 + season + trend)
+train_feat_all = train_feat_lags_ma6.join(
+    train_feat_season_trend.select(["key","periods","month_sin","month_cos","period_index"]),
+    on=["key","periods"], how="left"
+)
+
+# Map of feature name -> dataframe
+FEATURE_DFS = {
+    "baseline": train_feat_baseline,
+    "lags_ma6": train_feat_lags_ma6,
+    "season_trend": train_feat_season_trend,
+    "all": train_feat_all
+}
+
+
+
+
+# ===== CONFIGURE THIS CELL BEFORE RUN =====
+FEATURE_NAME = "all"   # change to "baseline" / "lags_ma6" / "season_trend" / "all"
+MODEL_LABEL = "LR"
+start_test_period = datetime(2025, 7, 1)
+test_period_count = 6
+test_period_list = [ start_test_period + relativedelta(months=i) for i in range(test_period_count) ]
+n_cpus = 18
+
+# ===== DO NOT EDIT BELOW (unless you know what you do) =====
+train_df_pol = FEATURE_DFS[FEATURE_NAME]
+
+# build jobs (same pattern as you had)
+jobs = []
+for zone in tqdm(np.sort(train_df_pol["zone"].unique())):
+    for test_period in test_period_list:
+        curr_train_df = train_df_pol.filter(pl.col("zone") == zone).drop("zone").to_pandas()
+        jobs.append((curr_train_df, test_period))
+
+# run forecasting in parallel using your LR function
+rs_parts = []
+with Pool(n_cpus) as pool:
+    for res in pool.imap_unordered(run_zone_forecasting_lr, jobs, chunksize=1):
+        rs_parts.append(res)
+rs_df = pd.concat(rs_parts, ignore_index=True)
+
+# ===== EVALUATION (your code re-used) =====
+rs_with_error_df = pl.from_pandas(rs_df).with_columns(
+  re=pl.col("pred")-pl.col("so_nw_ct"),
+  ae=(pl.col("pred")-pl.col("so_nw_ct")).abs()
+).with_columns(
+  mape=pl.when(pl.col("so_nw_ct") > 0)
+      .then(pl.col("ae")/pl.col("so_nw_ct"))
+      .otherwise(1)
+).with_columns(
+  mape=pl.when(pl.col("mape") > 1)
+      .then(1)
+      .otherwise(pl.col("mape"))
+)
+
+perform_df = rs_with_error_df.pivot(
+  on="periods",
+  index="key",
+  values="mape",
+  aggregate_function="sum",
+  sort_columns=True
+)
+
+perform_df = perform_df.with_columns(
+  mape_avg=perform_df.drop("key").mean_horizontal(),
+  pareto80_flag=pl.when(pl.col("key").is_in(pareto_df["key"])).then(1).otherwise(0),
+  zone=pl.col("key").str.split("_").list.get(0)
+)
+
+# Save snapshots to disk (model + feature in filename)
+rs_fname = os.path.join(RESULTS_DIR, f"rs_with_error_{MODEL_LABEL}_{FEATURE_NAME}.csv")
+perf_fname = os.path.join(RESULTS_DIR, f"perform_{MODEL_LABEL}_{FEATURE_NAME}.csv")
+rs_with_error_df.write_csv(rs_fname)
+perform_df.write_csv(perf_fname)
+print("Saved:", rs_fname, perf_fname)
+
+# Produce summary row for report
+summary = perform_df.groupby("pareto80_flag").agg(pl.col("mape_avg").mean().round(4).alias("avg_mape"), pl.count().alias("comb_count"))
+summary = summary.with_columns(
+    pl.lit(MODEL_LABEL).alias("model"),
+    pl.lit(FEATURE_NAME).alias("feature")
+)
+# convert to pandas for easier appending to a report list
+summary_pd = summary.to_pandas()
+display(summary_pd)
+
+
+
+# read all saved perform files and concat
+all_files = [f for f in os.listdir(RESULTS_DIR) if f.startswith("perform_") and f.endswith(".csv")]
+report_rows = []
+for f in sorted(all_files):
+    df = pl.read_csv(os.path.join(RESULTS_DIR, f))
+    # ensure columns exist
+    if "mape_avg" not in df.columns:
+        # compute if needed (older files)
+        df = df.with_columns(mape_avg = df.drop("key").mean_horizontal())
+    # model and feature are encoded in filename: perform_<MODEL>_<FEATURE>.csv
+    basename = f.replace("perform_","").replace(".csv","")
+    model_name, feature_name = basename.split("_",1)
+    df2 = df.select(["pareto80_flag","mape_avg"]).with_columns(
+        pl.lit(model_name).alias("model"),
+        pl.lit(feature_name).alias("feature")
+    )
+    report_rows.append(df2)
+
+report_all = pl.concat(report_rows).groupby(["model","feature","pareto80_flag"]).agg(
+    pl.col("mape_avg").mean().round(4).alias("avg_mape"),
+    pl.count().alias("comb_count")
+).sort(["model","feature","pareto80_flag"])
+report_all.write_csv(os.path.join(RESULTS_DIR, "final_model_feature_report.csv"))
+display(report_all)
+print("Saved final report to:", os.path.join(RESULTS_DIR, "final_model_feature_report.csv"))
+
+
+# Also keep the Polars frames in memory under model-feature names (optional)
+globals()[f"rs_with_error_{MODEL_LABEL}_{FEATURE_NAME}"] = rs_with_error_df
+globals()[f"perform_{MODEL_LABEL}_{FEATURE_NAME}"] = perform_df
