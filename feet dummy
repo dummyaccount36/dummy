@@ -27,18 +27,31 @@ train_feat_lags_ma6 = train_df_base.with_columns(
 
 # Feature set 3: add simple seasonal + trend (month sin/cos, period_index)
 # We'll parse periods "YYYY MM" to a date and extract month and index
+
 train_feat_season_trend = train_df_base.with_columns(
-    period_dt = pl.col("periods").str.strptime(pl.Date, fmt="%Y %m"),
+    period_dt = pl.col("periods").str.strptime(pl.Date, "%Y %m")
 )
+
 train_feat_season_trend = train_feat_season_trend.with_columns(
     month = pl.col("period_dt").dt.month().cast(pl.Int32),
-    period_index = pl.col("periods").apply(lambda s: int(s.replace(" ", ""))).cast(pl.Int64)  # simple numeric index
+    year = pl.col("period_dt").dt.year().cast(pl.Int32)
 )
-# month_sin / month_cos using Python math via apply (safe)
+
+# numeric trend index: year * 12 + month
 train_feat_season_trend = train_feat_season_trend.with_columns(
-    pl.col("month").apply(lambda m: math.sin(2*math.pi*m/12)).alias("month_sin"),
-    pl.col("month").apply(lambda m: math.cos(2*math.pi*m/12)).alias("month_cos")
+    period_index = (pl.col("year") * 12 + pl.col("month")).cast(pl.Int64)
 )
+
+# seasonal encoding (Polars-native trig)
+train_feat_season_trend = train_feat_season_trend.with_columns(
+    month_sin = (2 * np.pi * pl.col("month") / 12).sin(),
+    month_cos = (2 * np.pi * pl.col("month") / 12).cos()
+)
+
+
+
+
+
 
 # Feature set 4: combined (lags + ma6 + season + trend)
 train_feat_all = train_feat_lags_ma6.join(
