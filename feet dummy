@@ -311,3 +311,14 @@ print(forecast_df.filter(pl.col("key").str.starts_with("ZONE02B")).head(10))
 
 forecast_df.write_csv(f"results/forecast_LR_{best_feature}.csv")
 print("Forecast saved:", f"results/forecast_LR_{best_feature}.csv")
+
+
+
+
+
+forecast_zone2b = forecast_df.filter(pl.col("zone") == "ZONE02B")
+
+forecast_zone2b_path = f"../data/forecast_LR_{best_feature}_ZONE02B.csv"
+forecast_zone2b.write_csv(forecast_zone2b_path)
+
+print("ZONE02B forecast saved:", forecast_zone2b_path)
