@@ -1,83 +1,131 @@
-plot_df = forecast_df.to_pandas()
+plt.rcParams["figure.figsize"] = (12,4)
+plt.rcParams["figure.dpi"] = 120
 
-# convert "YYYY MM" → datetime
-plot_df["period_dt"] = pd.to_datetime(plot_df["periods"], format="%Y %m")
-
-# sort properly
-plot_df = plot_df.sort_values(["key", "period_dt"])
+RESULTS_DIR = Path("results")
 
 
-plt.figure(figsize=(12, 6))
-
-plt.plot(plot_df["period_dt"], plot_df["so_nw_ct"], label="Actual", alpha=0.7)
-plt.plot(plot_df["period_dt"], plot_df["pred"], label="Forecast (LR)", alpha=0.7)
-
-plt.title("Actual vs Forecast — Linear Regression")
-plt.xlabel("Period")
-plt.ylabel("so_nw_ct")
-plt.legend()
-plt.grid(True)
-plt.tight_layout()
-plt.show()
-
-
-zone_key = "ZONE02B"
-
-zone_df = plot_df[plot_df["key"].str.startswith(zone_key)]
-
-print("Number of rows:", len(zone_df))
-zone_df.head()
-
-
-plt.figure(figsize=(12, 6))
-
-plt.plot(
-    zone_df["period_dt"],
-    zone_df["so_nw_ct"],
-    marker="o",
-    label="Actual"
+rs_rf_all = pd.read_csv(
+    RESULTS_DIR / "rs_with_error_RF_all.csv"
 )
 
-plt.plot(
-    zone_df["period_dt"],
-    zone_df["pred"],
-    marker="x",
-    linestyle="--",
-    label="Forecast"
+rs_rf_all.head()
+
+
+
+rs_rf_all["period_dt"] = pd.to_datetime(
+    rs_rf_all["periods"].str.replace(" ", "-") + "-01",
+    format="%Y-%m-%d"
 )
 
-plt.title(f"Actual vs Forecast — {zone_key}")
+rs_rf_all = rs_rf_all.sort_values(["key", "period_dt"])
+
+
+
+df_k = rs_rf_all[rs_rf_all["key"] == example_key]
+
+plt.figure()
+plt.plot(df_k["period_dt"], df_k["so_nw_ct"], marker="o", label="Actual")
+plt.plot(df_k["period_dt"], df_k["pred"], marker="o", linestyle="--", label="Forecast")
+
+plt.title(f"RF Forecast vs Actual\n{example_key}")
 plt.xlabel("Period")
-plt.ylabel("so_nw_ct")
+plt.ylabel("SO Quantity")
 plt.legend()
-plt.grid(True)
 plt.tight_layout()
 plt.show()
 
 
 
-plt.figure(figsize=(12, 4))
 
-plt.plot(zone_df["period_dt"], zone_df["ae"], marker="o")
 
-plt.title(f"Absolute Error over Time — {zone_key}")
+
+
+top_keys = (
+    rs_rf_all[rs_rf_all["periods"].str.contains("2025")]
+    .groupby("key")["so_nw_ct"]
+    .sum()
+    .sort_values(ascending=False)
+    .head(6)
+    .index
+)
+
+
+
+
+fig, axes = plt.subplots(3, 2, figsize=(14,9), sharex=True)
+axes = axes.flatten()
+
+for ax, key in zip(axes, top_keys):
+    d = rs_rf_all[rs_rf_all["key"] == key]
+    ax.plot(d["period_dt"], d["so_nw_ct"], marker="o", label="Actual")
+    ax.plot(d["period_dt"], d["pred"], marker="o", linestyle="--", label="Forecast")
+    ax.set_title(key)
+    ax.legend(fontsize=8)
+
+plt.tight_layout()
+plt.show()
+
+
+
+
+
+
+zone_keys = rs_rf_all[
+    rs_rf_all["key"].str.startswith("ZONE02B")
+]["key"].unique()[:4]
+
+
+
+
+fig, axes = plt.subplots(2, 2, figsize=(14,7), sharex=True)
+axes = axes.flatten()
+
+for ax, key in zip(axes, zone_keys):
+    d = rs_rf_all[rs_rf_all["key"] == key]
+    ax.plot(d["period_dt"], d["so_nw_ct"], label="Actual")
+    ax.plot(d["period_dt"], d["pred"], linestyle="--", label="Forecast")
+    ax.set_title(key)
+    ax.legend(fontsize=8)
+
+plt.tight_layout()
+plt.show()
+
+
+
+
+
+plt.figure()
+sns.lineplot(
+    data=rs_rf_all[rs_rf_all["periods"].str.contains("2025")],
+    x="period_dt",
+    y="mape",
+    estimator="mean"
+)
+plt.title("Average MAPE Over Time (RF)")
+plt.ylabel("MAPE")
 plt.xlabel("Period")
-plt.ylabel("Absolute Error")
-plt.grid(True)
-plt.tight_layout()
-plt.show()
-
-
-plt.figure(figsize=(6, 4))
-plt.hist(zone_df["mape"], bins=20)
-
-plt.title(f"MAPE Distribution — {zone_key}")
-plt.xlabel("MAPE")
-plt.ylabel("Frequency")
-plt.grid(True)
 plt.tight_layout()
 plt.show()
 
 
 
 
+
+
+rs_lr_all = pd.read_csv(RESULTS_DIR / "rs_with_error_LR_all.csv")
+rs_lr_all["period_dt"] = pd.to_datetime(
+    rs_lr_all["periods"].str.replace(" ", "-") + "-01"
+)
+
+d_rf = rs_rf_all[rs_rf_all["key"] == example_key]
+d_lr = rs_lr_all[rs_lr_all["key"] == example_key]
+
+plt.figure()
+plt.plot(d_rf["period_dt"], d_rf["so_nw_ct"], label="Actual", color="black")
+plt.plot(d_rf["period_dt"], d_rf["pred"], "--", label="RF")
+plt.plot(d_lr["period_dt"], d_lr["pred"], "--", label="LR")
+
+plt.title(f"RF vs LR Forecast\n{example_key}")
+plt.legend()
+plt.tight_layout()
+plt.show()
