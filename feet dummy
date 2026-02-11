@@ -280,3 +280,34 @@ def run_zone_forecasting_lr_temp_debug(args):
     rs_df = pd.concat(rs_df, ignore_index=True)
     return rs_df
 
+
+
+
+import polars as pl
+
+feature_list = ["baseline", "lags_ma6", "season_trend", "all"]
+results_summary = []
+
+for feat in feature_list:
+    df = pl.read_csv(f"results/perform_LR_{feat}.csv")
+    avg_mape = df["mape_avg"].mean()
+    results_summary.append({"feature": feat, "avg_mape": avg_mape})
+
+summary_df = pl.DataFrame(results_summary)
+print(summary_df.sort("avg_mape"))
+
+
+best_feature = "all"
+
+forecast_df = pl.read_csv(f"results/rs_with_error_LR_{best_feature}.csv")
+
+
+# Show first 10 rows
+print(forecast_df.head(10))
+
+# Filter a zone
+print(forecast_df.filter(pl.col("key").str.starts_with("ZONE02B")).head(10))
+
+
+forecast_df.write_csv(f"results/forecast_LR_{best_feature}.csv")
+print("Forecast saved:", f"results/forecast_LR_{best_feature}.csv")
