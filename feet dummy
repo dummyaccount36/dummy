@@ -187,3 +187,96 @@ print("Saved final report to:", os.path.join(RESULTS_DIR, "final_model_feature_r
 
 
 
+def run_zone_forecasting_lr_temp_debug(args):
+    train_df, test_period = args
+
+    rs_df = []
+
+    max_train_period = (test_period - relativedelta(months=3)).strftime("%Y %m")
+    test_period = test_period.strftime("%Y %m")
+
+    curr_train_df = train_df.loc[train_df["periods"] <= max_train_period]
+    curr_test_df = train_df.loc[train_df["periods"] == test_period]
+
+    for key in np.sort(train_df["key"].unique()):
+
+        curr_train_df_ = curr_train_df.loc[
+            (curr_train_df["key"] == key) &
+            (curr_train_df["periods"] <= max_train_period)
+        ].drop(["key", "periods"], axis=1)
+
+        if len(curr_train_df_) > 0:
+
+            curr_test_df_ = curr_test_df.loc[
+                (curr_test_df["key"] == key) &
+                (curr_test_df["periods"] == test_period)
+            ].drop(["key", "periods"], axis=1)
+
+            # =========================
+            # 🔍 NaN DEBUG BLOCK
+            # =========================
+            if curr_test_df_.isna().any().any():
+                print("\n🚨 NaN FOUND")
+                print("key:", key)
+                print("period:", test_period)
+                print("NaN count per column:")
+                print(curr_test_df_.isna().sum())
+                print("Row content:")
+                print(curr_test_df_)
+                print("=" * 60)
+
+            # guard against empty test rows
+            if len(curr_test_df_) == 0:
+                continue
+
+            if curr_test_df_.iloc[0]["ma3"] > 0:
+
+                X_train = curr_train_df_.drop("so_nw_ct", axis=1)
+                y_train = curr_train_df_["so_nw_ct"]
+
+                X_test = curr_test_df_.drop("so_nw_ct", axis=1)
+                y_test = curr_test_df_["so_nw_ct"]
+
+                # model
+                model = LinearRegression()
+                model.fit(X_train, y_train)
+                pred = model.predict(X_test)
+
+                rs_df.append(pd.DataFrame({
+                    "key": key,
+                    "periods": test_period,
+                    "m-0": X_test["m-0"].values,
+                    "m-1": X_test["m-1"].values,
+                    "m-2": X_test["m-2"].values,
+                    "ma3": X_test["ma3"].values,
+                    "so_nw_ct": y_test.values,
+                    "pred": pred
+                }))
+
+            else:
+                rs_df.append(pd.DataFrame({
+                    "key": [key],
+                    "periods": [test_period],
+                    "m-0": [0],
+                    "m-1": [0],
+                    "m-2": [0],
+                    "ma3": [0],
+                    "so_nw_ct": [0],
+                    "pred": [0]
+                }))
+
+        else:
+            rs_df.append(pd.DataFrame({
+                "key": [key],
+                "periods": [test_period],
+                "m-0": [0],
+                "m-1": [0],
+                "m-2": [0],
+                "ma3": [0],
+                "so_nw_ct": [0],
+                "pred": [0]
+            }))
+
+    rs_df = pd.concat(rs_df, ignore_index=True)
+    return rs_df
+
