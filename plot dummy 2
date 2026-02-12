@@ -748,3 +748,200 @@ def plot_key_full_history(df_pol, key):
 
 for k in keys_to_plot:
     plot_key_full_history(df_hist, k)
+
+
+
+
+
+
+
+
+
+# Single cell — HISTORY (so_fcst_df) + TEST (mentor predictions) -> plot top3 zone1 & zone3 keys
+import polars as pl
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+from pathlib import Path
+
+# === Config ===
+MENTOR_FILE = "mentor_lr_results.csv"   # change if your mentor CSV has a different name
+FORECAST_START = "2025-07-01"           # highlight from this date onward
+ZONE1_PREFIX = "ZONE01"
+ZONE3_PREFIX = "ZONE03"
+
+# === 1) Load / locate full historical dataframe (so_fcst_df) ===
+if "so_fcst_df" in globals():
+    df_hist = so_fcst_df  # polars DF already in memory
+else:
+    # try to find a common CSV fallback — adjust path if you keep full data elsewhere
+    fallback = Path("data/sellout_for_forecast_sample.csv")
+    if fallback.exists():
+        df_hist = pl.read_csv(fallback)
+    else:
+        raise RuntimeError("Full historical dataframe 'so_fcst_df' not found in memory and fallback CSV not found. "
+                           "Load your full data into variable `so_fcst_df` or place CSV at data/sellout_for_forecast_sample.csv")
+
+# Ensure columns exist and cast types
+df_hist = df_hist.with_columns([
+    pl.col("periods").cast(pl.Utf8),
+    pl.col("so_nw_ct").cast(pl.Float64)
+])
+
+# If key not present in full df, construct it (matches your pipeline)
+if "key" not in df_hist.columns:
+    # try to create with zone_soldto_shipto_ac pattern if columns exist, otherwise expect 'key' present
+    if {"zone","soldto","shipto","ac"}.issubset(set(df_hist.columns)):
+        df_hist = df_hist.with_columns((pl.col("zone") + "_" + pl.col("soldto") + "_" + pl.col("shipto") + "_" + pl.col("ac")).alias("key"))
+    else:
+        raise RuntimeError("Full history dataframe does not contain 'key' and construction columns (zone,soldto,shipto,ac) not found.")
+
+# parse periods into datetime column
+df_hist = df_hist.with_columns(pl.col("periods").str.replace(" ", "-").str.to_datetime("%Y-%m").alias("period_dt"))
+
+# === 2) Load mentor/test predictions (mentor file covers test horizon) ===
+mentor_path = Path(MENTOR_FILE)
+if not mentor_path.exists():
+    raise RuntimeError(f"Mentor file not found: {MENTOR_FILE}. Place it in current dir or change MENTOR_FILE path.")
+df_test = pl.read_csv(mentor_path).with_columns([
+    pl.col("periods").cast(pl.Utf8),
+    pl.col("so_nw_ct").cast(pl.Float64),
+    pl.col("pred").cast(pl.Float64),
+    pl.col("periods").str.replace(" ", "-").str.to_datetime("%Y-%m").alias("period_dt")
+])
+
+# If test lacks 'key' but can be constructed, the mentor file should already have key; otherwise error
+if "key" not in df_test.columns:
+    raise RuntimeError("Mentor predictions file must contain 'key' column (format: zone_soldto_shipto_ac).")
+
+# === 3) Pick top-3 contributors per zone (use full-history 2025 totals for ranking) ===
+# Use 2025 rows from history for ranking (if missing, fall back to all history)
+hist_2025 = df_hist.filter(pl.col("periods").str.contains("2025"))
+if hist_2025.height == 0:
+    hist_for_rank = df_hist
+else:
+    hist_for_rank = hist_2025
+
+def top_n_keys_for_zone(df_pol, zone_prefix, n=3):
+    return (
+        df_pol
+        .filter(pl.col("key").str.starts_with(zone_prefix))
+        .group_by("key")
+        .agg(pl.col("so_nw_ct").sum().alias("total_qty"))
+        .sort("total_qty", descending=True)
+        .head(n)
+        .select("key")
+        .to_series()
+        .to_list()
+    )
+
+top3_z1 = top_n_keys_for_zone(hist_for_rank, ZONE1_PREFIX, 3)
+top3_z3 = top_n_keys_for_zone(hist_for_rank, ZONE3_PREFIX, 3)
+
+keys_to_plot = top3_z1 + top3_z3
+if len(keys_to_plot) == 0:
+    raise RuntimeError("No keys found for the zone prefixes. Check your zone naming or content of so_fcst_df.")
+
+print("Top keys to plot (Zone1 then Zone3):", keys_to_plot)
+
+# === 4) Build combined timeline: history actuals + test predictions ===
+# Prepare df_hist subset for keys_to_plot (include all periods available)
+hist_subset = df_hist.filter(pl.col("key").is_in(keys_to_plot)).select(["key","periods","period_dt","so_nw_ct"])
+# For historical rows, pred is null
+hist_subset = hist_subset.with_columns(pl.lit(None).cast(pl.Float64).alias("pred"))
+
+# Prepare test subset (only keys_to_plot)
+test_subset = df_test.filter(pl.col("key").is_in(keys_to_plot)).select(["key","periods","period_dt","so_nw_ct","pred"])
+
+# Concatenate (vertical) and sort
+df_all = pl.concat([hist_subset, test_subset], how="vertical").sort(["key","period_dt"])
+
+# === 5) Quick sanity: show start/end per key ===
+print(df_all.groupby("key").agg(pl.min("period_dt").alias("start"), pl.max("period_dt").alias("end"), pl.count().alias("n_periods")).to_pandas())
+
+# === 6) Plotting: one subplot per key, consistent y-limits within each zone group ===
+import math
+pd_all = df_all.to_pandas()
+pd_all["period_dt"] = pd.to_datetime(pd_all["period_dt"])
+
+# Prepare zone grouping for consistent y-limits
+zone_map = {k: k.split("_",1)[0] for k in keys_to_plot}
+zone_keys = {
+    ZONE1_PREFIX: [k for k in keys_to_plot if k.startswith(ZONE1_PREFIX)],
+    ZONE3_PREFIX: [k for k in keys_to_plot if k.startswith(ZONE3_PREFIX)]
+}
+
+# compute y-limits per zone across all keys in that zone
+y_limits = {}
+for zone_prefix, keys in zone_keys.items():
+    if len(keys) == 0:
+        continue
+    subset = pd_all[pd_all["key"].isin(keys)]
+    if subset.empty:
+        ymin, ymax = 0, 1
+    else:
+        ymin = min(subset["so_nw_ct"].min(skipna=True), subset["pred"].min(skipna=True))
+        ymax = max(subset["so_nw_ct"].max(skipna=True), subset["pred"].max(skipna=True))
+        if np.isnan(ymin): ymin = 0
+        if np.isnan(ymax): ymax = 1
+    pad = (ymax - ymin) * 0.15 if ymax > ymin else max(1, ymax*0.1)
+    y_limits[zone_prefix] = (ymin - pad, ymax + pad)
+
+# Plot layout
+total = len(keys_to_plot)
+cols = 1
+rows = total
+fig, axes = plt.subplots(rows, cols, figsize=(12, 3*rows), squeeze=False)
+
+for idx, key in enumerate(keys_to_plot):
+    ax = axes[idx,0]
+    d = pd_all[pd_all["key"] == key].sort_values("period_dt")
+    if d.empty:
+        ax.text(0.5, 0.5, f"No data for {key}", ha="center")
+        continue
+
+    # actual full history
+    ax.plot(d["period_dt"], d["so_nw_ct"], marker="o", label="Actual", color="black")
+    # prediction (only present for testing rows)
+    # plot pred where not null
+    d_pred = d[~d["pred"].isna()]
+    if not d_pred.empty:
+        ax.plot(d_pred["period_dt"], d_pred["pred"], marker="o", linestyle="--", label="Pred (test)")
+
+    # vertical marker and shaded area for test period
+    fs = pd.to_datetime(FORECAST_START)
+    ax.axvline(fs, color="red", linestyle=":", linewidth=1)
+    ax.axvspan(fs, d["period_dt"].max(), color="grey", alpha=0.08)
+
+    # set y limits based on zone
+    zone_pref = key.split("_",1)[0]
+    if zone_pref in y_limits:
+        ax.set_ylim(y_limits[zone_pref])
+
+    ax.set_title(key)
+    ax.set_xlabel("")
+    ax.set_ylabel("so_nw_ct")
+    ax.grid(alpha=0.2)
+    ax.legend(fontsize=8)
+
+plt.tight_layout()
+plt.show()
+
+# === 7) Numeric summary (for test period only) ===
+print("\nNumeric summary for test period (2025-07 to 2025-12) per key:")
+test_pd = pd_all[~pd_all["pred"].isna()]  # only test-period rows where pred exists
+for key in keys_to_plot:
+    d = test_pd[test_pd["key"]==key]
+    if d.empty:
+        print(f"{key}: no test rows")
+        continue
+    ae = np.abs(d["pred"] - d["so_nw_ct"])
+    nonzero_mask = d["so_nw_ct"] > 0
+    mape = (ae[nonzero_mask] / d.loc[nonzero_mask,"so_nw_ct"]) * 100 if nonzero_mask.any() else pd.Series(dtype=float)
+    print(f"\n{key}")
+    print(f" count test rows: {len(d)}")
+    print(f" mean_actual: {d['so_nw_ct'].mean():,.1f}")
+    print(f" mean_pred:   {d['pred'].mean():,.1f}")
+    print(f" mean_AE:     {ae.mean():,.1f}")
+    print(f" mean_MAPE%:  {mape.mean():.1f}" if len(mape)>0 else " mean_MAPE%: N/A (all actuals zero)")
+
