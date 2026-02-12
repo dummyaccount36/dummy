@@ -509,3 +509,171 @@ for i, key in enumerate(top_keys_zone3, start=1):
         key,
         title=f"Zone 3 – Top Contributor {i} ({key})"
     )
+
+
+---------------------------
+
+df = pl.read_csv(MENTOR_FILE)
+
+# Ensure expected columns exist
+expected = {"key", "periods", "so_nw_ct", "pred"}
+missing = expected - set(df.columns)
+if missing:
+    raise ValueError(f"Missing columns in file: {missing}")
+
+# cast numeric columns in case they are strings
+df = df.with_columns([
+    pl.col("so_nw_ct").cast(pl.Float64).alias("so_nw_ct"),
+    pl.col("pred").cast(pl.Float64).alias("pred")
+])
+
+# quick head and number of unique keys
+print("rows:", df.shape[0])
+print("unique keys:", df.select(pl.col("key")).unique().shape[0])
+df.head()
+
+
+
+
+# Assumes zone is the first element before underscore in key, e.g. "ZONE01_...."
+df = df.with_columns(
+    pl.col("key").str.split("_").list.get(0).alias("zone")
+)
+
+# show distinct zones so you can confirm naming (e.g. "ZONE01" or "ZONE1")
+zones = df.select("zone").unique().to_series().to_list()
+print("Distinct zones (sample):", zones[:20])
+
+
+
+
+# Common zone formats seen earlier: "ZONE01" or "ZONE1".
+# Adjust this list if your zone strings use a different convention.
+zones_to_check = ["ZONE01", "ZONE1", "ZONE03", "ZONE3"]
+
+# We'll pick zone strings that actually exist in the file
+existing_zones = [z for z in zones_to_check if z in zones]
+if not existing_zones:
+    raise ValueError(f"None of the expected zone ids found in file. Distinct zones: {zones[:20]}")
+
+# Map the "logical" zones we want to actual strings present
+zone1_candidates = [z for z in existing_zones if z.startswith("ZONE0") and z.endswith("1") or z.endswith("1")]
+zone3_candidates = [z for z in existing_zones if z.startswith("ZONE0") and z.endswith("3") or z.endswith("3")]
+
+# Fallback: choose the first matching pattern
+zone1 = zone1_candidates[0] if zone1_candidates else existing_zones[0]
+zone3 = zone3_candidates[0] if zone3_candidates else (existing_zones[1] if len(existing_zones) > 1 else existing_zones[0])
+
+print("Using zone1 =", zone1)
+print("Using zone3 =", zone3)
+
+
+
+
+def top_n_keys(df_pol, zone_value, n=3):
+    agg = (
+        df_pol
+        .filter(pl.col("zone") == zone_value)
+        .group_by("key")
+        .agg(pl.col("so_nw_ct").sum().alias("total_qty"))
+        .sort("total_qty", descending=True)
+    )
+    return agg.head(n).select("key").to_series().to_list()
+
+top3_zone1 = top_n_keys(df, zone1, n=3)
+top3_zone3 = top_n_keys(df, zone3, n=3)
+
+print("Top 3 keys Zone1:", top3_zone1)
+print("Top 3 keys Zone3:", top3_zone3)
+
+
+
+def key_df_pandas(df_pol, key):
+    # select key rows, convert periods to datetime (assumes "YYYY MM" format)
+    d = df_pol.filter(pl.col("key") == key).select(["periods", "so_nw_ct", "pred"]).sort("periods").to_pandas()
+    # convert periods like "2025 07" -> "2025-07-01"
+    d["period_dt"] = pd.to_datetime(d["periods"].str.replace(" ", "-") + "-01", format="%Y-%m-%d", errors="coerce")
+    d = d.sort_values("period_dt").reset_index(drop=True)
+    return d
+
+
+
+keys = top3_zone1
+if not keys:
+    print("No keys found for zone1:", zone1)
+else:
+    fig, axes = plt.subplots(len(keys), 1, figsize=(10, 3*len(keys)), sharex=True)
+    if len(keys) == 1:
+        axes = [axes]
+    for ax, key in zip(axes, keys):
+        d = key_df_pandas(df, key)
+        if d.empty:
+            ax.text(0.5, 0.5, f"No data for {key}", ha="center")
+            continue
+        ax.plot(d["period_dt"], d["so_nw_ct"], marker="o", label="Actual")
+        ax.plot(d["period_dt"], d["pred"], marker="o", linestyle="--", label="LR pred")
+        ax.set_title(f"Zone1 ({zone1}) — {key}")
+        ax.set_ylabel("so_nw_ct")
+        ax.legend(fontsize=8)
+        ax.grid(alpha=0.2)
+    plt.tight_layout()
+    plt.show()
+
+
+
+
+keys = top3_zone3
+if not keys:
+    print("No keys found for zone3:", zone3)
+else:
+    fig, axes = plt.subplots(len(keys), 1, figsize=(10, 3*len(keys)), sharex=True)
+    if len(keys) == 1:
+        axes = [axes]
+    for ax, key in zip(axes, keys):
+        d = key_df_pandas(df, key)
+        if d.empty:
+            ax.text(0.5, 0.5, f"No data for {key}", ha="center")
+            continue
+        ax.plot(d["period_dt"], d["so_nw_ct"], marker="o", label="Actual")
+        ax.plot(d["period_dt"], d["pred"], marker="o", linestyle="--", label="LR pred")
+        ax.set_title(f"Zone3 ({zone3}) — {key}")
+        ax.set_ylabel("so_nw_ct")
+        ax.legend(fontsize=8)
+        ax.grid(alpha=0.2)
+    plt.tight_layout()
+    plt.show()
+
+
+
+
+
+import numpy as np
+
+def summary_metrics(df_p):
+    # df_p must have columns: period_dt, so_nw_ct, pred
+    if df_p.empty:
+        return {}
+    ae = np.abs(df_p["pred"] - df_p["so_nw_ct"])
+    # MAPE: ignore zero actuals
+    nonzero_mask = df_p["so_nw_ct"] > 0
+    mape = (ae[nonzero_mask] / df_p.loc[nonzero_mask, "so_nw_ct"]) * 100
+    return {
+        "count": len(df_p),
+        "mean_actual": df_p["so_nw_ct"].mean(),
+        "mean_pred": df_p["pred"].mean(),
+        "mean_abs_error": ae.mean(),
+        "median_abs_error": np.median(ae),
+        "mape_mean_%": mape.mean() if len(mape) else None,
+        "mape_median_%": np.median(mape) if len(mape) else None
+    }
+
+print("Zone1 summaries")
+for key in top3_zone1:
+    d = key_df_pandas(df, key)
+    print(key, summary_metrics(d))
+
+print("\nZone3 summaries")
+for key in top3_zone3:
+    d = key_df_pandas(df, key)
+    print(key, summary_metrics(d))
+
