@@ -390,9 +390,66 @@ df_lr_k.select(
 
 
 
+-------------------------------------------------------------------------------------------------------------------------------------------
+
+rs_lr_1 = pl.read_csv("rs_with_error_lr.csv")
+rs_lr_2 = pl.read_csv("rs_with_error_lr_2.csv")
+
+rs_lr_1.shape, rs_lr_2.shape
+
+
+rs_lr_1.select(["key", "periods"]).unique().shape, \
+rs_lr_2.select(["key", "periods"]).unique().shape
+
+
+stats_1 = rs_lr_1.select(pl.col("pred").describe())
+stats_2 = rs_lr_2.select(pl.col("pred").describe())
+
+stats_1, stats_2
+
+
+stats_compare = (
+    stats_1
+    .rename({"pred": "lr_run_1"})
+    .with_columns(stats_2["pred"].alias("lr_run_2"))
+)
+
+stats_compare
+
+
+diff = (
+    rs_lr_1
+    .select(["key", "periods", "pred"])
+    .join(
+        rs_lr_2.select(["key", "periods", "pred"]),
+        on=["key", "periods"],
+        suffix="_2"
+    )
+    .with_columns((pl.col("pred_2") - pl.col("pred")).alias("pred_diff"))
+)
+
+diff.select(pl.col("pred_diff").describe())
+
+
+-------------------------------------------------------
+
+perf_1 = pl.read_csv("perform_lr.csv")
+perf_2 = pl.read_csv("perform_lr_2.csv")
 
 
 
+perf_1.select(pl.all().exclude(pl.Utf8)).columns
+
+
+perf_1.describe(), perf_2.describe()
+
+
+perf_1.select(pl.col("mape").describe()), \
+perf_2.select(pl.col("mape").describe())
+
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------
 rs_lr = pl.read_csv("results/rs_with_error_LR_baseline.csv")
 
 
