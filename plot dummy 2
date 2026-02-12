@@ -125,6 +125,36 @@ plt.plot(d_rf["period_dt"], d_rf["so_nw_ct"], label="Actual", color="black")
 plt.plot(d_rf["period_dt"], d_rf["pred"], "--", label="RF")
 plt.plot(d_lr["period_dt"], d_lr["pred"], "--", label="LR")
 
+
+
+
+df_hist = rs_rf_all[
+    (rs_rf_all["key"] == example_key) &
+    (rs_rf_all["so_nw_ct"] > 0)
+]
+
+plt.figure()
+plt.plot(df_hist["period_dt"], df_hist["so_nw_ct"], label="Actual")
+plt.plot(df_hist["period_dt"], df_hist["pred"], "--", label="Fitted")
+
+plt.title(f"Historical Fit (RF)\n{example_key}")
+plt.legend()
+plt.show()
+
+
+df_future = rs_rf_all[
+    (rs_rf_all["key"] == example_key) &
+    (rs_rf_all["so_nw_ct"] == 0)
+]
+
+plt.figure()
+plt.plot(df_future["period_dt"], df_future["pred"], "--", label="Forecast")
+
+plt.title(f"Forecast (RF)\n{example_key}")
+plt.legend()
+plt.show()
+
+
 plt.title(f"RF vs LR Forecast\n{example_key}")
 plt.legend()
 plt.tight_layout()
