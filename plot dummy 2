@@ -128,34 +128,140 @@ plt.plot(d_lr["period_dt"], d_lr["pred"], "--", label="LR")
 
 
 
-df_hist = rs_rf_all[
-    (rs_rf_all["key"] == example_key) &
-    (rs_rf_all["so_nw_ct"] > 0)
-]
-
-plt.figure()
-plt.plot(df_hist["period_dt"], df_hist["so_nw_ct"], label="Actual")
-plt.plot(df_hist["period_dt"], df_hist["pred"], "--", label="Fitted")
-
-plt.title(f"Historical Fit (RF)\n{example_key}")
-plt.legend()
-plt.show()
 
 
-df_future = rs_rf_all[
-    (rs_rf_all["key"] == example_key) &
-    (rs_rf_all["so_nw_ct"] == 0)
-]
+rs_rf = pd.read_csv(RESULTS_DIR / "rs_with_error_RF_all.csv")
+rs_lr = pd.read_csv(RESULTS_DIR / "rs_with_error_LR_all.csv")
 
-plt.figure()
-plt.plot(df_future["period_dt"], df_future["pred"], "--", label="Forecast")
+# normalize column names if necessary (safe guard)
+for df in (rs_rf, rs_lr):
+    if "periods" not in df.columns and "period" in df.columns:
+        df.rename(columns={"period":"periods"}, inplace=True)
 
-plt.title(f"Forecast (RF)\n{example_key}")
-plt.legend()
-plt.show()
+# create period datetime
+for df in (rs_rf, rs_lr):
+    df["period_dt"] = pd.to_datetime(df["periods"].str.replace(" ", "-") + "-01", format="%Y-%m-%d", errors="coerce")
 
 
-plt.title(f"RF vs LR Forecast\n{example_key}")
-plt.legend()
+
+
+# remove rows where so_nw_ct is zero or NaN (these were placeholders)
+rs_rf_nonzero = rs_rf[rs_rf["so_nw_ct"].notnull() & (rs_rf["so_nw_ct"] != 0)].copy()
+rs_lr_nonzero = rs_lr[rs_lr["so_nw_ct"].notnull() & (rs_lr["so_nw_ct"] != 0)].copy()
+
+# create zone column by splitting key (first element before underscore)
+for df in (rs_rf_nonzero, rs_lr_nonzero):
+    df["zone"] = df["key"].astype(str).str.split("_").str.get(0)
+
+
+
+
+print("RF nonzero rows:", len(rs_rf_nonzero))
+print("LR nonzero rows:", len(rs_lr_nonzero))
+
+# restrict to 2025 when finding top zones (makes sense for your analysis)
+rf_2025 = rs_rf_nonzero[rs_rf_nonzero["periods"].str.contains("2025", na=False)]
+zone_sales = rf_2025.groupby("zone")["so_nw_ct"].sum().sort_values(ascending=False)
+zone_sales.head(10)
+
+
+
+n = 4  # change if you want more zones
+top_zones = zone_sales.head(n).index.tolist()
+top_zones
+
+
+
+
+def agg_zone(df, model_label):
+    g = df.groupby(["zone", "period_dt"], as_index=False).agg({
+        "so_nw_ct": "sum",
+        "pred": "sum"
+    })
+    g = g.rename(columns={"pred": f"pred_{model_label}", "so_nw_ct": "so_nw_ct"})
+    return g
+
+agg_rf = agg_zone(rs_rf_nonzero, "RF")
+agg_lr = agg_zone(rs_lr_nonzero, "LR")
+
+# merge RF+LR aggregates (inner join on zone+period_dt)
+agg_all = agg_rf.merge(agg_lr, on=["zone", "period_dt"], how="outer", suffixes=("_rf", "_lr"))
+# ensure sorted
+agg_all = agg_all.sort_values(["zone", "period_dt"]).reset_index(drop=True)
+
+# quick check
+agg_all.head()
+
+
+
+
+zones = top_zones   # selected zones
+cols = 2
+rows = int(np.ceil(len(zones) / cols))
+fig, axes = plt.subplots(rows, cols, figsize=(14, 4 * rows), sharex=True)
+axes = axes.flatten()
+
+for ax_idx, zone in enumerate(zones):
+    ax = axes[ax_idx]
+    d = agg_all[agg_all["zone"] == zone].sort_values("period_dt")
+    if d.empty:
+        ax.text(0.5, 0.5, f"No data for {zone}", ha="center")
+        continue
+    ax.plot(d["period_dt"], d["so_nw_ct"], marker="o", label="Actual (sum)")
+    ax.plot(d["period_dt"], d["pred_RF"], marker="o", linestyle="--", label="RF Pred (sum)")
+    ax.set_title(zone)
+    ax.set_ylabel("SO quantity (sum)")
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.2)
+
+# hide unused axes
+for j in range(len(zones), len(axes)):
+    fig.delaxes(axes[j])
+
 plt.tight_layout()
 plt.show()
+
+
+
+
+
+zones = top_zones
+cols = 2
+rows = int(np.ceil(len(zones) / cols))
+fig, axes = plt.subplots(rows, cols, figsize=(14, 4 * rows), sharex=True)
+axes = axes.flatten()
+
+for ax_idx, zone in enumerate(zones):
+    ax = axes[ax_idx]
+    d = agg_all[agg_all["zone"] == zone].sort_values("period_dt")
+    if d.empty:
+        ax.text(0.5, 0.5, f"No data for {zone}", ha="center")
+        continue
+    ax.plot(d["period_dt"], d["so_nw_ct"], marker="o", label="Actual (sum)", color="black")
+    if "pred_RF" in d.columns:
+        ax.plot(d["period_dt"], d["pred_RF"], marker="o", linestyle="--", label="RF Pred (sum)")
+    if "pred_LR" in d.columns:
+        ax.plot(d["period_dt"], d["pred_LR"], marker="s", linestyle=":", label="LR Pred (sum)")
+    ax.set_title(zone)
+    ax.set_ylabel("SO quantity (sum)")
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.2)
+
+for j in range(len(zones), len(axes)):
+    fig.delaxes(axes[j])
+
+plt.tight_layout()
+plt.show()
+
+
+
+
+
+
+
+
+
+
+
+
+
