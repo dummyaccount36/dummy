@@ -327,3 +327,63 @@ plt.xticks(rotation=45, ha="right")
 plt.tight_layout()
 plt.show()
 
+
+
+
+
+rs_lr = pl.read_csv("rs_with_error_LR_all.csv")
+rs_rf = pl.read_csv("rs_with_error_RF_all.csv")
+
+rs_lr = rs_lr.filter(pl.col("periods") >= "2024 01")
+rs_rf = rs_rf.filter(pl.col("periods") >= "2024 01")
+
+
+
+
+candidate_keys = (
+    rs_lr
+    .group_by("key")
+    .agg(pl.col("so_nw_ct").sum().alias("total_qty"))
+    .filter(pl.col("total_qty") > 0)
+    .sort("total_qty", descending=True)
+)
+
+candidate_keys.head(10)
+
+
+
+
+one_zone_key = candidate_keys["key"][0]
+one_zone_key
+
+
+
+
+df_lr_k = (
+    rs_lr
+    .filter(pl.col("key") == one_zone_key)
+    .select(["periods", "so_nw_ct", "pred"])
+    .sort("periods")
+)
+
+df_lr_k
+
+
+
+df_rf_k = (
+    rs_rf
+    .filter(pl.col("key") == one_zone_key)
+    .select(["periods", "so_nw_ct", "pred"])
+    .sort("periods")
+)
+
+df_rf_k
+
+
+
+
+
+df_lr_k.select(
+    pl.col("so_nw_ct").describe(),
+    pl.col("pred").describe()
+)
