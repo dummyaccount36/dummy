@@ -269,3 +269,66 @@ zone_compare = perform_all.group_by(
 ).sort(["zone", "model", "pareto80_flag"])
 
 zone_compare
+
+
+
+
+
+
+
+import matplotlib.pyplot as plt
+import polars as pl
+import pandas as pd
+
+for key in keys_to_plot:  # top3 zone1 + top3 zone3
+
+    # --- actuals: FULL HISTORY ---
+    df_actual = (
+        so_fcst_df
+        .filter(pl.col("key") == key)
+        .select(["periods", "so_nw_ct"])
+        .sort("periods")
+        .to_pandas()
+    )
+
+    # --- predictions: TEST PERIOD ONLY ---
+    df_pred = (
+        mentor_df
+        .filter(pl.col("key") == key)
+        .select(["periods", "pred"])
+        .sort("periods")
+        .to_pandas()
+    )
+
+    # --- merge (left join keeps full history) ---
+    df_plot = df_actual.merge(
+        df_pred,
+        on="periods",
+        how="left"
+    )
+
+    # --- plot ---
+    plt.figure(figsize=(9, 5))
+
+    plt.plot(
+        df_plot["periods"],
+        df_plot["so_nw_ct"],
+        marker="o",
+        label="Actual"
+    )
+
+    plt.plot(
+        df_plot["periods"],
+        df_plot["pred"],
+        marker="o",
+        linestyle="--",
+        label="Prediction"
+    )
+
+    plt.title(f"{key} — Full History vs Prediction")
+    plt.xlabel("Period")
+    plt.ylabel("Sell-Out (so_nw_ct)")
+    plt.xticks(rotation=45)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
