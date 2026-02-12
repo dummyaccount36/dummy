@@ -260,8 +260,70 @@ plt.show()
 
 
 
+eval_rf = rs_rf.copy()
+eval_lr = rs_lr.copy()
+
+# remove zero / padded actuals
+eval_rf = eval_rf[eval_rf["so_nw_ct"] > 0]
+eval_lr = eval_lr[eval_lr["so_nw_ct"] > 0]
 
 
 
 
+eval_rf["mape"] = (eval_rf["ae"] / eval_rf["so_nw_ct"]) * 100
+eval_lr["mape"] = (eval_lr["ae"] / eval_lr["so_nw_ct"]) * 100
+
+
+
+
+plt.figure(figsize=(8,4))
+plt.boxplot(
+    [eval_rf["mape"], eval_lr["mape"]],
+    labels=["RF", "LR"],
+    showfliers=False
+)
+plt.ylabel("MAPE (%)")
+plt.title("MAPE Distribution (Non-zero Actuals)")
+plt.tight_layout()
+plt.show()
+
+
+
+
+for df in (eval_rf, eval_lr):
+    df["zone"] = df["key"].astype(str).str.split("_").str.get(0)
+
+
+
+
+
+zone_mape_rf = (
+    eval_rf.groupby("zone")["mape"]
+    .mean()
+    .rename("RF")
+)
+
+zone_mape_lr = (
+    eval_lr.groupby("zone")["mape"]
+    .mean()
+    .rename("LR")
+)
+
+zone_mape = pd.concat([zone_mape_rf, zone_mape_lr], axis=1)
+zone_mape = zone_mape.sort_values("RF")
+zone_mape.head(10)
+
+
+
+
+zone_mape.plot(
+    kind="bar",
+    figsize=(12,4)
+)
+
+plt.ylabel("Average MAPE (%)")
+plt.title("Average MAPE by Zone (Non-zero Actuals)")
+plt.xticks(rotation=45, ha="right")
+plt.tight_layout()
+plt.show()
 
