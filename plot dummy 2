@@ -387,3 +387,68 @@ df_lr_k.select(
     pl.col("so_nw_ct").describe(),
     pl.col("pred").describe()
 )
+
+
+
+
+
+
+rs_lr = pl.read_csv("results/rs_with_error_LR_baseline.csv")
+
+
+
+def top_n_keys_by_zone(df, zone_id, n=3):
+    return (
+        df
+        .filter(pl.col("zone") == zone_id)
+        .group_by("key")
+        .agg(pl.col("so_nw_ct").sum().alias("total_qty"))
+        .sort("total_qty", descending=True)
+        .head(n)
+        .select("key")
+        .to_series()
+        .to_list()
+    )
+
+
+top_keys_zone1 = top_n_keys_by_zone(rs_lr, zone_id=1, n=3)
+top_keys_zone3 = top_n_keys_by_zone(rs_lr, zone_id=3, n=3)
+
+top_keys_zone1, top_keys_zone3
+
+
+
+def plot_actual_vs_lr(df, key, title):
+    df_k = (
+        df
+        .filter(pl.col("key") == key)
+        .sort("periods")
+        .select(["periods", "so_nw_ct", "pred"])
+        .to_pandas()
+    )
+
+    plt.figure(figsize=(10, 4))
+    plt.plot(df_k["periods"], df_k["so_nw_ct"], label="Actual")
+    plt.plot(df_k["periods"], df_k["pred"], label="LR Forecast")
+    plt.xticks(rotation=45)
+    plt.title(title)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+
+
+for i, key in enumerate(top_keys_zone1, start=1):
+    plot_actual_vs_lr(
+        rs_lr,
+        key,
+        title=f"Zone 1 – Top Contributor {i} ({key})"
+    )
+
+
+for i, key in enumerate(top_keys_zone3, start=1):
+    plot_actual_vs_lr(
+        rs_lr,
+        key,
+        title=f"Zone 3 – Top Contributor {i} ({key})"
+    )
