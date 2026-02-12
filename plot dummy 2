@@ -685,33 +685,41 @@ for key in top3_zone3:
 
 
 
-# keys already computed earlier
+import polars as pl
+
+df_full = pl.read_csv("mentor_lr_results.csv").with_columns([
+    pl.col("so_nw_ct").cast(pl.Float64),
+    pl.col("pred").cast(pl.Float64),
+    pl.col("key").str.split("_").list.get(0).alias("zone"),
+    pl.col("periods")
+        .str.replace(" ", "-")
+        .str.to_datetime("%Y-%m")
+        .alias("period_dt")
+])
+
+df_full.select(["key","periods","so_nw_ct","pred"]).head()
+
+
 keys_to_plot = top3_z1 + top3_z3
 
 df_hist = (
-    df.filter(pl.col("key").is_in(keys_to_plot))
-      .with_columns(
-          pl.col("periods")
-            .str.replace(" ", "-")
-            .str.to_datetime("%Y-%m")
-            .alias("period_dt")
-      )
-      .sort(["key", "period_dt"])
+    df_full
+    .filter(pl.col("key").is_in(keys_to_plot))
+    .sort(["key", "period_dt"])
 )
 
-df_hist.select(["key","periods","so_nw_ct","pred"]).head()
-
-
-
-
-
+df_hist.groupby("key").agg(
+    pl.min("period_dt").alias("start"),
+    pl.max("period_dt").alias("end"),
+    pl.count().alias("n_periods")
+)
 
 
 
 import matplotlib.pyplot as plt
-import numpy as np
+import pandas as pd
 
-def plot_key_full_history(df_pol, key, highlight_start="2025-07"):
+def plot_key_full_history(df_pol, key):
     d = (
         df_pol.filter(pl.col("key") == key)
               .select(["period_dt","so_nw_ct","pred"])
@@ -719,29 +727,24 @@ def plot_key_full_history(df_pol, key, highlight_start="2025-07"):
               .sort_values("period_dt")
     )
 
-    # y-limits based on FULL history (important)
+    if d.empty:
+        print(f"{key}: no data")
+        return
+
     ymin = min(d["so_nw_ct"].min(), d["pred"].min())
     ymax = max(d["so_nw_ct"].max(), d["pred"].max())
-    pad = (ymax - ymin) * 0.15 if ymax > ymin else ymax * 0.1
+    pad = (ymax - ymin) * 0.15
 
     fig, ax = plt.subplots(figsize=(11, 3.5))
     ax.plot(d["period_dt"], d["so_nw_ct"], label="Actual", marker="o")
     ax.plot(d["period_dt"], d["pred"], label="Prediction", linestyle="--", marker="o")
 
-    # highlight Jul–Dec 2025 region
-    hs = pd.to_datetime(highlight_start)
-    ax.axvspan(hs, d["period_dt"].max(), color="grey", alpha=0.15, label="Focus period")
+    ax.axvline(pd.to_datetime("2025-07"), color="grey", linestyle=":", label="2025-07")
 
     ax.set_ylim(ymin - pad, ymax + pad)
-    ax.set_title(f"{key} — Full History (Actual vs Pred)")
+    ax.set_title(f"{key} — Full History")
     ax.legend()
     plt.show()
-
-
-
-
-
-
 
 for k in keys_to_plot:
     plot_key_full_history(df_hist, k)
