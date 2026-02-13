@@ -293,10 +293,120 @@ print("Saved comparison to:", out)
 
 -----------------------------------------------------------------------------------------
 
+def run_zone_forecasting_lr_exp(args):
+    train_df, test_period, train_window_months, oversample_flag = args
 
+    rs_df = []
+
+    max_train_period = (test_period - relativedelta(months=3)).strftime("%Y %m")
+    test_period_str = test_period.strftime("%Y %m")
+
+    curr_train_df = train_df.loc[train_df["periods"] <= max_train_period].copy()
+    curr_test_df = train_df.loc[train_df["periods"] == test_period_str]
+
+    # 👉 apply 1-year window if requested
+    if train_window_months is not None:
+        curr_train_df["period_dt"] = pd.to_datetime(curr_train_df["periods"].str.replace(" ", "-"))
+        max_train_dt = pd.to_datetime(max_train_period.replace(" ", "-"))
+        cutoff_dt = max_train_dt - relativedelta(months=train_window_months-1)
+        curr_train_df = curr_train_df.loc[curr_train_df["period_dt"] >= cutoff_dt]
+        curr_train_df = curr_train_df.drop(columns=["period_dt"])
+
+    for key in np.sort(train_df["key"].unique()):
+
+        curr_train_df_ = curr_train_df.loc[
+            (curr_train_df["key"] == key)
+        ].drop(["key", "periods"], axis=1)
+
+        if len(curr_train_df_) > 0:
+
+            curr_test_df_ = curr_test_df.loc[
+                (curr_test_df["key"] == key)
+            ].drop(["key", "periods"], axis=1)
+
+            if curr_test_df_.iloc[0]["ma3"] > 0:
+
+                # 👉 oversampling if enabled
+                if oversample_flag:
+                    pos_mask = curr_train_df_["so_nw_ct"] > 0
+                    n_pos = pos_mask.sum()
+                    n_total = len(curr_train_df_)
+                    if n_pos > 0:
+                        desired_pos = int(0.5 * n_total)
+                        if desired_pos > n_pos:
+                            n_to_sample = desired_pos - n_pos
+                            sampled = curr_train_df_.loc[pos_mask].sample(
+                                n=n_to_sample,
+                                replace=True,
+                                random_state=123
+                            )
+                            curr_train_df_ = pd.concat([curr_train_df_, sampled])
+
+                X_train = curr_train_df_.drop("so_nw_ct", axis=1)
+                y_train = curr_train_df_["so_nw_ct"]
+                X_test = curr_test_df_.drop("so_nw_ct", axis=1)
+                y_test = curr_test_df_["so_nw_ct"]
+
+                model = LinearRegression()
+                model.fit(X_train, y_train)
+                pred = model.predict(X_test)
+
+                rs_df.append(pd.DataFrame({
+                    "key": key,
+                    "periods": test_period_str,
+                    "m-0": X_test["m-0"],
+                    "m-1": X_test["m-1"],
+                    "m-2": X_test["m-2"],
+                    "ma3": X_test["ma3"],
+                    "so_nw_ct": y_test,
+                    "pred": pred
+                }))
+
+            else:
+                rs_df.append(pd.DataFrame({
+                    "key":[key],
+                    "periods":[test_period_str],
+                    "m-0":[0],
+                    "m-1":[0],
+                    "m-2":[0],
+                    "ma3":[0],
+                    "so_nw_ct":[0],
+                    "pred":[0]
+                }))
+        else:
+            rs_df.append(pd.DataFrame({
+                "key":[key],
+                "periods":[test_period_str],
+                "m-0":[0],
+                "m-1":[0],
+                "m-2":[0],
+                "ma3":[0],
+                "so_nw_ct":[0],
+                "pred":[0]
+            }))
+
+    return pd.concat(rs_df)
 
 -----------------------------------------------------------------------------------------
 
+jobs.append((curr_train_df, test_period, 12, False))
+
+rs_with_error_df.write_csv("rs_with_error_LR_1yr.csv")
+perform_df.write_csv("perform_LR_1yr.csv")
+
+
+
+jobs.append((curr_train_df, test_period, None, True))
+
+rs_with_error_df.write_csv("rs_with_error_LR_oversample.csv")
+perform_df.write_csv("perform_LR_oversample.csv")
+
+
+
+jobs.append((curr_train_df, test_period, 12, True))
+
+rs_with_error_df.write_csv("rs_with_error_LR_1yr_oversample.csv")
+perform_df.write_csv("perform_LR_1yr_oversample.csv")
 
 
 -----------------------------------------------------------------------------------------
