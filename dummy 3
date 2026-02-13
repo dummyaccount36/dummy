@@ -1,268 +1,306 @@
-from sklearn.utils import resample
+# CELL 1: Utilities (do NOT re-import libraries — this cell expects your earlier imports)
+# - oversample_train_df: per-key oversampling helper
+# - run_zone_forecasting_lr_exp: LR worker (designed to be called by Pool)
+# NOTE: This cell only defines functions; it doesn't execute experiments.
 
-def restrict_last_n_months(df, max_period, n_months=12):
-    max_dt = pd.to_datetime(max_period, format="%Y %m")
-    min_dt = max_dt - relativedelta(months=n_months-1)
-    return df[
-        (pd.to_datetime(df["periods"], format="%Y %m") >= min_dt) &
-        (pd.to_datetime(df["periods"], format="%Y %m") <= max_dt)
-    ]
+SEED = 123
+np.random.seed(SEED)
 
-
-def oversample_training_df(df):
+def oversample_train_df(pd_df, target_col="so_nw_ct", positive_threshold=0, desired_pos_ratio=0.5, random_state=SEED):
     """
-    Simple bootstrap oversampling on rows.
-    Keeps distribution shape but increases effective sample size.
+    Per-key oversampling:
+    - Upsample positive rows (target > positive_threshold) with replacement
+      until positive ratio >= desired_pos_ratio.
+    - Returns a new pandas DataFrame.
     """
-    if len(df) < 5:
-        return df
-    return resample(df, replace=True, n_samples=len(df)*2, random_state=42)
+    if pd_df.shape[0] == 0:
+        return pd_df
+    pos_mask = pd_df[target_col] > positive_threshold
+    n_pos = int(pos_mask.sum())
+    n_total = len(pd_df)
+    if n_pos == 0:
+        return pd_df  # nothing to oversample
+    desired_pos = int(np.round(desired_pos_ratio * n_total))
+    if desired_pos <= n_pos:
+        return pd_df
+    n_to_sample = desired_pos - n_pos
+    pos_df = pd_df.loc[pos_mask]
+    sampled = pos_df.sample(n=n_to_sample, replace=True, random_state=random_state)
+    new_df = pd.concat([pd_df, sampled], ignore_index=True)
+    new_df = new_df.sample(frac=1.0, random_state=random_state).reset_index(drop=True)
+    return new_df
+
+def run_zone_forecasting_lr_exp(args):
+    """
+    Worker function for LR experiments.
+    args: (curr_train_df (pandas), test_period (datetime), train_window_months (int|None), oversample_flag (bool))
+    Returns: pandas.DataFrame with predictions for all keys for that zone-test_period pair.
+    """
+    curr_train_df, test_period, train_window_months, oversample_flag = args
+    rs_rows = []
+
+    max_train_period = (test_period - relativedelta(months=3)).strftime("%Y %m")
+    test_period_str = test_period.strftime("%Y %m")
+
+    # restrict training rows to <= max_train_period
+    train_all = curr_train_df.loc[curr_train_df["periods"] <= max_train_period].copy()
+
+    # if windowing requested, keep only last `train_window_months` months (up to max_train_period)
+    if train_window_months is not None:
+        train_all["period_dt"] = pd.to_datetime(train_all["periods"].str.replace(" ", "-"), format="%Y-%m")
+        max_train_dt = pd.to_datetime(max_train_period.replace(" ", "-"), format="%Y-%m")
+        cutoff_dt = max_train_dt - relativedelta(months=train_window_months-1)
+        train_all = train_all.loc[train_all["period_dt"] >= cutoff_dt].drop(columns=["period_dt"])
+
+    # make test slice
+    test_slice = curr_train_df.loc[curr_train_df["periods"] == test_period_str].copy()
+
+    # iterate over keys (use original unique keys so behavior matches your baseline)
+    for key in np.sort(curr_train_df["key"].unique()):
+        train_k = train_all.loc[(train_all["key"] == key) & (train_all["periods"] <= max_train_period)].drop(["key","periods"], axis=1, errors="ignore")
+        if len(train_k) > 0:
+            test_k = test_slice.loc[(test_slice["key"] == key) & (test_slice["periods"] == test_period_str)].drop(["key","periods"], axis=1, errors="ignore")
+            if test_k.shape[0] == 0:
+                # no test row for this key-period -> zeros (keeps consistent with original)
+                rs_rows.append({"key":key, "periods":test_period_str, "m-0":0, "m-1":0, "m-2":0, "ma3":0, "so_nw_ct":0, "pred":0})
+                continue
+
+            # only predict if test ma3 > 0 (same rule you used)
+            if float(test_k.iloc[0].get("ma3", 0)) > 0:
+                # optionally oversample the training rows for this key
+                train_for_model = train_k.reset_index(drop=True)
+                if oversample_flag:
+                    train_for_model = oversample_train_df(train_for_model, target_col="so_nw_ct", desired_pos_ratio=0.5, random_state=SEED)
+
+                X_train = train_for_model.drop("so_nw_ct", axis=1, errors="ignore")
+                y_train = train_for_model["so_nw_ct"]
+                X_test = test_k.drop("so_nw_ct", axis=1, errors="ignore")
+                y_test = test_k["so_nw_ct"]
+
+                model = LinearRegression()
+                try:
+                    model.fit(X_train, y_train)
+                    pred = model.predict(X_test)
+                except Exception as e:
+                    pred = np.zeros(len(X_test))
+
+                # extract fields safely
+                m0 = X_test["m-0"].values[0] if "m-0" in X_test.columns else 0
+                m1 = X_test["m-1"].values[0] if "m-1" in X_test.columns else 0
+                m2 = X_test["m-2"].values[0] if "m-2" in X_test.columns else 0
+                ma3 = X_test["ma3"].values[0] if "ma3" in X_test.columns else 0
+
+                rs_rows.append({
+                    "key": key,
+                    "periods": test_period_str,
+                    "m-0": m0,
+                    "m-1": m1,
+                    "m-2": m2,
+                    "ma3": ma3,
+                    "so_nw_ct": float(y_test.values[0]),
+                    "pred": float(pred[0]) if hasattr(pred, "__len__") else float(pred)
+                })
+            else:
+                rs_rows.append({"key":key, "periods":test_period_str, "m-0":0, "m-1":0, "m-2":0, "ma3":0, "so_nw_ct":0, "pred":0})
+        else:
+            rs_rows.append({"key":key, "periods":test_period_str, "m-0":0, "m-1":0, "m-2":0, "ma3":0, "so_nw_ct":0, "pred":0})
+
+    return pd.DataFrame(rs_rows)
 
 -----------------------------------------------------------------------------------------
 
-def run_lr_1year(jobs):
-    rs_df = []
-    with Pool(18) as pool:
-        for train_df, test_period in jobs:
-            max_train_period = (test_period - relativedelta(months=3)).strftime("%Y %m")
-            train_df_1y = restrict_last_n_months(train_df, max_train_period, 12)
-            rs_df.append(run_zone_forecasting_lr((train_df_1y, test_period)))
-    return pd.concat(rs_df)
+# CELL 2: Run LR experiment limited to last 12 months (1 year) for training (no oversampling).
+# Saves: rs_with_error_LR_1yr.csv and perform_LR_1yr.csv in current working dir.
 
+print("Running LR | 1-year training experiment ...")
+start_test_period = datetime(2025, 7, 1)
+test_period_count = 6
+test_period_list = [ start_test_period + relativedelta(months=i) for i in range(test_period_count) ]
 
-rs_lr_1y = run_lr_1year(jobs)
-pl.from_pandas(rs_lr_1y).write_csv("rs_with_error_lr_1y.csv")
+FEATURE_NAME = "all"   # change if you want other feature sets (must exist in FEATURE_DFS)
+train_df_pol = FEATURE_DFS[FEATURE_NAME]  # uses your existing FEATURE_DFS
 
------------------------------------------------------------------------------------------
+jobs = []
+for zone in np.sort(train_df_pol["zone"].unique()):
+    for tp in test_period_list:
+        curr_train_df = train_df_pol.filter(pl.col("zone")==zone).drop("zone").to_pandas()
+        curr_train_df["periods"] = curr_train_df["periods"].astype(str)
+        jobs.append((curr_train_df, tp, 12, False))  # 12 months window, no oversample
 
-def run_lr_oversample(jobs):
-    rs_df = []
-    with Pool(18) as pool:
-        for train_df, test_period in jobs:
-            train_df_os = oversample_training_df(train_df)
-            rs_df.append(run_zone_forecasting_lr((train_df_os, test_period)))
-    return pd.concat(rs_df)
+rs_parts = []
+n_cpus = min(18, os.cpu_count() or 4)
+with Pool(n_cpus) as pool:
+    for res in pool.imap_unordered(run_zone_forecasting_lr_exp, jobs, chunksize=1):
+        rs_parts.append(res)
 
-rs_lr_os = run_lr_oversample(jobs)
-pl.from_pandas(rs_lr_os).write_csv("rs_with_error_lr_os.csv")
-
------------------------------------------------------------------------------------------
-
-def run_lr_1y_oversample(jobs):
-    rs_df = []
-    with Pool(18) as pool:
-        for train_df, test_period in jobs:
-            max_train_period = (test_period - relativedelta(months=3)).strftime("%Y %m")
-            train_df_1y = restrict_last_n_months(train_df, max_train_period, 12)
-            train_df_1y_os = oversample_training_df(train_df_1y)
-            rs_df.append(run_zone_forecasting_lr((train_df_1y_os, test_period)))
-    return pd.concat(rs_df)
-
-rs_lr_1y_os = run_lr_1y_oversample(jobs)
-pl.from_pandas(rs_lr_1y_os).write_csv("rs_with_error_lr_1y_os.csv")
-
------------------------------------------------------------------------------------------
-
-def build_performance(df, label):
-    pl_df = pl.from_pandas(df).with_columns(
-        ae=(pl.col("pred")-pl.col("so_nw_ct")).abs(),
-        mape=pl.when(pl.col("so_nw_ct") > 0)
-              .then((pl.col("pred")-pl.col("so_nw_ct")).abs()/pl.col("so_nw_ct"))
-              .otherwise(1)
-    ).with_columns(
-        mape=pl.when(pl.col("mape") > 1).then(1).otherwise(pl.col("mape"))
-    )
-
-    perf = pl_df.group_by("key").agg(
-        pl.mean("mape").alias("mape_avg")
-    ).with_columns(
-        model=pl.lit(label),
-        zone=pl.col("key").str.split("_").list.get(0)
-    )
-    return perf
-
------------------------------------------------------------------------------------------
-
-baseline = build_performance(rs_df, "baseline")
-one_year = build_performance(rs_lr_1y, "1_year")
-oversamp = build_performance(rs_lr_os, "oversampling")
-one_year_os = build_performance(rs_lr_1y_os, "1_year_oversampling")
-
-compare_df = pl.concat([
-    baseline, one_year, oversamp, one_year_os
-])
-
-compare_summary = compare_df.group_by("model").agg(
-    pl.mean("mape_avg").alias("mean_mape"),
-    pl.median("mape_avg").alias("median_mape")
+rs_df = pd.concat(rs_parts, ignore_index=True)
+# compute errors with polars and save
+rs_pol = pl.from_pandas(rs_df).with_columns(
+    re = pl.col("pred") - pl.col("so_nw_ct"),
+    ae = (pl.col("pred") - pl.col("so_nw_ct")).abs()
+).with_columns(
+    mape = pl.when(pl.col("so_nw_ct") > 0).then(pl.col("ae")/pl.col("so_nw_ct")).otherwise(1)
+).with_columns(
+    mape = pl.when(pl.col("mape") > 1).then(1).otherwise(pl.col("mape"))
 )
 
-compare_df.write_csv("lr_compare_by_key.csv")
-compare_summary.write_csv("lr_compare_summary.csv")
-
------------------------------------------------------------------------------------------
-
-# cell 1,
-def restrict_last_n_months(df, max_period, n_months):
-    periods = (
-        pd.to_datetime(df["periods"], format="%Y %m")
-        .sort_values()
-        .unique()
-    )
-    max_p = pd.to_datetime(max_period, format="%Y %m")
-    valid_periods = periods[periods <= max_p][-n_months:]
-    valid_periods_str = [p.strftime("%Y %m") for p in valid_periods]
-    return df.loc[df["periods"].isin(valid_periods_str)]
-
-# cell 2
-def oversample_training_df(df):
-    df_nonzero = df[df["so_nw_ct"] > 0]
-    if df_nonzero.empty:
-        return df
-
-    median_qty = df_nonzero["so_nw_ct"].median()
-    low_mask = df["so_nw_ct"] < median_qty
-
-    df_low = df[low_mask]
-    df_high = df[~low_mask]
-
-    if df_low.empty:
-        return df
-
-    repeat_factor = max(1, int(len(df_high) / len(df_low)))
-    df_low_os = pd.concat([df_low] * repeat_factor, ignore_index=True)
-
-    return pd.concat([df_high, df_low_os], ignore_index=True)
-
-# cell 3
-def run_lr_1year(jobs):
-    rs_df = []
-
-    for train_df, test_period in jobs:
-        max_train_period = (test_period - relativedelta(months=3)).strftime("%Y %m")
-        train_df_1y = restrict_last_n_months(train_df, max_train_period, 12)
-
-        rs_df.append(
-            run_zone_forecasting_lr((train_df_1y, test_period))
-        )
-
-    return pd.concat(rs_df, ignore_index=True)
-
-rs_lr_1y = run_lr_1year(jobs)
-pl.from_pandas(rs_lr_1y).write_csv("rs_with_error_lr_1y.csv")
-
-# cell 4
-def run_lr_os(jobs):
-    rs_df = []
-
-    for train_df, test_period in jobs:
-        train_df_os = oversample_training_df(train_df)
-
-        rs_df.append(
-            run_zone_forecasting_lr((train_df_os, test_period))
-        )
-
-    return pd.concat(rs_df, ignore_index=True)
-
-
-rs_lr_os = run_lr_os(jobs)
-pl.from_pandas(rs_lr_os).write_csv("rs_with_error_lr_os.csv")
-
-# cell 5
-def run_lr_1y_os(jobs):
-    rs_df = []
-
-    for train_df, test_period in jobs:
-        max_train_period = (test_period - relativedelta(months=3)).strftime("%Y %m")
-        train_df_1y = restrict_last_n_months(train_df, max_train_period, 12)
-        train_df_os = oversample_training_df(train_df_1y)
-
-        rs_df.append(
-            run_zone_forecasting_lr((train_df_os, test_period))
-        )
-
-    return pd.concat(rs_df, ignore_index=True)
-
-
-rs_lr_1y_os = run_lr_1y_os(jobs)
-pl.from_pandas(rs_lr_1y_os).write_csv("rs_with_error_lr_1y_os.csv")
-
-# cell 6
-def build_performance(rs_df, pareto_df):
-    rs_with_error_df = pl.from_pandas(rs_df).with_columns(
-        re=pl.col("pred") - pl.col("so_nw_ct"),
-        ae=(pl.col("pred") - pl.col("so_nw_ct")).abs()
-    ).with_columns(
-        mape=pl.when(pl.col("so_nw_ct") > 0)
-              .then(pl.col("ae") / pl.col("so_nw_ct"))
-              .otherwise(1)
-    ).with_columns(
-        mape=pl.when(pl.col("mape") > 1).then(1).otherwise(pl.col("mape"))
-    )
-
-    perform_df = rs_with_error_df.pivot(
-        on="periods",
-        index="key",
-        values="mape",
-        aggregate_function="sum",
-        sort_columns=True
-    )
-
-    # compute horizontal mean explicitly from the dataframe (safer)
-    perform_df = perform_df.with_columns(
-        mape_avg = perform_df.drop("key").mean_horizontal(),
-        pareto80_flag = pl.col("key").is_in(pareto_df["key"]).cast(pl.Int8),
-        zone = pl.col("key").str.split("_").list.get(0)
-    )
-
-
-    return rs_with_error_df, perform_df
-
-# cell 7
-rs_base_err, perf_base = build_performance(rs_df, pareto_df)
-rs_1y_err, perf_1y = build_performance(rs_lr_1y, pareto_df)
-rs_os_err, perf_os = build_performance(rs_lr_os, pareto_df)
-rs_1y_os_err, perf_1y_os = build_performance(rs_lr_1y_os, pareto_df)
-
-perf_base = perf_base.with_columns(model=pl.lit("baseline"))
-perf_1y = perf_1y.with_columns(model=pl.lit("1_year"))
-perf_os = perf_os.with_columns(model=pl.lit("oversampling"))
-perf_1y_os = perf_1y_os.with_columns(model=pl.lit("1_year_oversampling"))
-
-compare_df = pl.concat([
-    perf_base,
-    perf_1y,
-    perf_os,
-    perf_1y_os
-])
-
-compare_summary = compare_df.group_by("model").agg(
-    pl.mean("mape_avg").alias("mean_mape"),
-    pl.median("mape_avg").alias("median_mape")
+perform_df = rs_pol.pivot(on="periods", index="key", values="mape", aggregate_function="sum", sort_columns=True)
+perform_df = perform_df.with_columns(mape_avg = perform_df.drop("key").mean_horizontal())
+perform_df = perform_df.with_columns(
+    pareto80_flag=pl.when(pl.col("key").is_in(pareto_df["key"])).then(1).otherwise(0),
+    zone = pl.col("key").str.split("_").list.get(0)
 )
 
-compare_df.write_csv("lr_compare_by_key.csv")
-compare_summary.write_csv("lr_compare_summary.csv")
+rs_pol.write_csv("rs_with_error_LR_1yr.csv")
+perform_df.write_csv("perform_LR_1yr.csv")
+print("Saved rs_with_error_LR_1yr.csv and perform_LR_1yr.csv")
 
 -----------------------------------------------------------------------------------------
 
-def run_lr_1year(jobs):
-    rs_df = []
+# CELL 3: Run LR experiment with oversampling (no 1-year limit).
+# Saves: rs_with_error_LR_oversample.csv and perform_LR_oversample.csv
 
-    for train_df, test_period in jobs:
-        max_train_period = (test_period - relativedelta(months=3)).strftime("%Y %m")
-        test_period_str = test_period.strftime("%Y %m")
+print("Running LR | oversampling experiment ...")
+FEATURE_NAME = "all"
+train_df_pol = FEATURE_DFS[FEATURE_NAME]
 
-        train_df_1y = restrict_last_n_months(train_df, max_train_period, 12)
+start_test_period = datetime(2025, 7, 1)
+test_period_count = 6
+test_period_list = [ start_test_period + relativedelta(months=i) for i in range(test_period_count) ]
 
-        if not (train_df_1y["periods"] == test_period_str).any():
-            continue
+jobs = []
+for zone in np.sort(train_df_pol["zone"].unique()):
+    for tp in test_period_list:
+        curr_train_df = train_df_pol.filter(pl.col("zone")==zone).drop("zone").to_pandas()
+        curr_train_df["periods"] = curr_train_df["periods"].astype(str)
+        jobs.append((curr_train_df, tp, None, True))  # no window, oversample True
 
-        rs_df.append(
-            run_zone_forecasting_lr((train_df_1y, test_period))
-        )
+rs_parts = []
+n_cpus = min(18, os.cpu_count() or 4)
+with Pool(n_cpus) as pool:
+    for res in pool.imap_unordered(run_zone_forecasting_lr_exp, jobs, chunksize=1):
+        rs_parts.append(res)
 
-    return pd.concat(rs_df, ignore_index=True)
+rs_df = pd.concat(rs_parts, ignore_index=True)
+rs_pol = pl.from_pandas(rs_df).with_columns(
+    re = pl.col("pred") - pl.col("so_nw_ct"),
+    ae = (pl.col("pred") - pl.col("so_nw_ct")).abs()
+).with_columns(
+    mape = pl.when(pl.col("so_nw_ct") > 0).then(pl.col("ae")/pl.col("so_nw_ct")).otherwise(1)
+).with_columns(
+    mape = pl.when(pl.col("mape") > 1).then(1).otherwise(pl.col("mape"))
+)
+
+perform_df = rs_pol.pivot(on="periods", index="key", values="mape", aggregate_function="sum", sort_columns=True)
+perform_df = perform_df.with_columns(mape_avg = perform_df.drop("key").mean_horizontal())
+perform_df = perform_df.with_columns(
+    pareto80_flag=pl.when(pl.col("key").is_in(pareto_df["key"])).then(1).otherwise(0),
+    zone = pl.col("key").str.split("_").list.get(0)
+)
+
+rs_pol.write_csv("rs_with_error_LR_oversample.csv")
+perform_df.write_csv("perform_LR_oversample.csv")
+print("Saved rs_with_error_LR_oversample.csv and perform_LR_oversample.csv")
+
+-----------------------------------------------------------------------------------------
+
+# CELL 4: Run LR experiment with 1-year window AND oversampling.
+# Saves: rs_with_error_LR_1yr_oversample.csv and perform_LR_1yr_oversample.csv
+
+print("Running LR | 1-year + oversampling experiment ...")
+FEATURE_NAME = "all"
+train_df_pol = FEATURE_DFS[FEATURE_NAME]
+
+start_test_period = datetime(2025, 7, 1)
+test_period_count = 6
+test_period_list = [ start_test_period + relativedelta(months=i) for i in range(test_period_count) ]
+
+jobs = []
+for zone in np.sort(train_df_pol["zone"].unique()):
+    for tp in test_period_list:
+        curr_train_df = train_df_pol.filter(pl.col("zone")==zone).drop("zone").to_pandas()
+        curr_train_df["periods"] = curr_train_df["periods"].astype(str)
+        jobs.append((curr_train_df, tp, 12, True))  # 12 months window, oversample True
+
+rs_parts = []
+n_cpus = min(18, os.cpu_count() or 4)
+with Pool(n_cpus) as pool:
+    for res in pool.imap_unordered(run_zone_forecasting_lr_exp, jobs, chunksize=1):
+        rs_parts.append(res)
+
+rs_df = pd.concat(rs_parts, ignore_index=True)
+rs_pol = pl.from_pandas(rs_df).with_columns(
+    re = pl.col("pred") - pl.col("so_nw_ct"),
+    ae = (pl.col("pred") - pl.col("so_nw_ct")).abs()
+).with_columns(
+    mape = pl.when(pl.col("so_nw_ct") > 0).then(pl.col("ae")/pl.col("so_nw_ct")).otherwise(1)
+).with_columns(
+    mape = pl.when(pl.col("mape") > 1).then(1).otherwise(pl.col("mape"))
+)
+
+perform_df = rs_pol.pivot(on="periods", index="key", values="mape", aggregate_function="sum", sort_columns=True)
+perform_df = perform_df.with_columns(mape_avg = perform_df.drop("key").mean_horizontal())
+perform_df = perform_df.with_columns(
+    pareto80_flag=pl.when(pl.col("key").is_in(pareto_df["key"])).then(1).otherwise(0),
+    zone = pl.col("key").str.split("_").list.get(0)
+)
+
+rs_pol.write_csv("rs_with_error_LR_1yr_oversample.csv")
+perform_df.write_csv("perform_LR_1yr_oversample.csv")
+print("Saved rs_with_error_LR_1yr_oversample.csv and perform_LR_1yr_oversample.csv")
+
+-----------------------------------------------------------------------------------------
+
+# CELL 5: Build comparison summary across experiments (baseline + the 3 new experiments)
+# This reads perform_LR_baseline.csv (your original baseline) and the three perform_* files.
+# Saves: final_LR_experiments_comparison.csv
+
+files_to_read = [
+    ("perform_LR_baseline.csv", "baseline"),
+    ("perform_LR_1yr.csv", "1yr"),
+    ("perform_LR_oversample.csv", "oversample"),
+    ("perform_LR_1yr_oversample.csv", "1yr_oversample")
+]
+
+report_rows = []
+for fname, exp_name in files_to_read:
+    p = Path(fname)
+    if not p.exists():
+        print(f"Warning: {fname} not found — skipping. (If this is baseline, ensure perform_LR_baseline.csv exists.)")
+        continue
+    df = pl.read_csv(fname)
+    if "mape_avg" not in df.columns:
+        df = df.with_columns(mape_avg = df.drop("key").mean_horizontal())
+    # attach experiment label
+    df2 = df.select(["pareto80_flag","mape_avg"]).with_columns(
+        pl.lit("LR").alias("model"),
+        pl.lit(exp_name).alias("experiment")
+    )
+    report_rows.append(df2)
+
+if len(report_rows) == 0:
+    raise RuntimeError("No perform_ files found. Run experiment cells first or ensure baseline exists.")
+
+report_all = pl.concat(report_rows).group_by(["model","experiment","pareto80_flag"]).agg(
+    pl.col("mape_avg").mean().round(4).alias("avg_mape"),
+    pl.count().alias("comb_count")
+).sort(["model","experiment","pareto80_flag"])
+
+out = "final_LR_experiments_comparison.csv"
+report_all.write_csv(out)
+display(report_all)
+print("Saved comparison to:", out)
+
+-----------------------------------------------------------------------------------------
+
+
+
+-----------------------------------------------------------------------------------------
+
+
+
+-----------------------------------------------------------------------------------------
+
 
 
 -----------------------------------------------------------------------------------------
