@@ -1,0 +1,400 @@
+n_cpus = 12             # change to available CPU cores
+start_test_period = datetime(2025, 7, 1)
+test_period_count = 6
+test_period_list = [ start_test_period + relativedelta(months=i) for i in range(test_period_count) ]
+
+------------------------------------------------------
+
+# helper to ensure train_df used by the functions is exactly the same structure you used originally:
+def ensure_train_df_from_sofcst(df_pol):
+    # expects so_fcst_df style polars DF
+    df = df_pol.select(["zone","key","periods","so_nw_ct"]).with_columns([
+        pl.col("so_nw_ct").shift(3).alias("m-0"),
+        pl.col("so_nw_ct").shift(4).alias("m-1"),
+        pl.col("so_nw_ct").shift(5).alias("m-2")
+    ]).filter(pl.col("periods") >= "2023 01").with_columns(
+        ( (pl.col("m-0") + pl.col("m-1") + pl.col("m-2")) / 3 ).alias("ma3")
+    )
+    # convert to pandas because the run functions operate in pandas (as your original)
+    return df.to_pandas()
+
+------------------------------------------------------
+
+# This is a copy of your original run_zone_forecasting_lr logic, modified to enforce a 12-month training window
+def run_zone_forecasting_lr_1y(args):
+    train_df, test_period = args
+    # train_df expected as pandas DataFrame, periods column format "YYYY MM"
+    rs_rows = []
+
+    # compute strings for bounds
+    max_train_period = (test_period - relativedelta(months=3)).strftime("%Y %m")  # original max used in your function
+    min_train_period = (test_period - relativedelta(months=12)).strftime("%Y %m") # NEW: 12-month window start
+    test_period_str = test_period.strftime("%Y %m")
+
+    # filter per job: only rows within sliding 12-month window (<= max_train_period and >= min_train_period)
+    curr_train_df = train_df.loc[(train_df["periods"] <= max_train_period) & (train_df["periods"] >= min_train_period)]
+    curr_test_df = train_df.loc[train_df["periods"] == test_period_str]
+
+    # iterate keys (use full key list from original train df so consistent coverage)
+    for key in np.sort(train_df["key"].unique()):
+        curr_train_df_ = curr_train_df.loc[(curr_train_df["key"] == key) & (curr_train_df["periods"] <= max_train_period)].drop(["key","periods"], axis=1)
+
+        if len(curr_train_df_) > 0:
+            curr_test_df_ = curr_test_df.loc[(curr_test_df["key"] == key) & (curr_test_df["periods"] == test_period_str)].drop(["key","periods"], axis=1)
+            # handle case where no test row exists for this key at this test_period
+            if curr_test_df_.shape[0] == 0:
+                # append a zero-row like your original did (keeps shape consistent)
+                rs_rows.append({
+                    "key": key, "periods": test_period_str,
+                    "m-0": 0, "m-1": 0, "m-2": 0, "ma3": 0,
+                    "so_nw_ct": 0, "pred": 0
+                })
+                continue
+
+            # ensure positive predictor
+            if curr_test_df_.iloc[0]["ma3"] > 0:
+                X_train = curr_train_df_.drop("so_nw_ct", axis=1)
+                y_train = curr_train_df_["so_nw_ct"]
+                X_test = curr_test_df_.drop("so_nw_ct", axis=1)
+                y_test = curr_test_df_["so_nw_ct"]
+
+                model = LinearRegression()
+                model.fit(X_train, y_train)
+                pred = model.predict(X_test)
+
+                rs_rows.append({
+                    "key": key,
+                    "periods": test_period_str,
+                    "m-0": X_test["m-0"].iloc[0] if "m-0" in X_test.columns else 0,
+                    "m-1": X_test["m-1"].iloc[0] if "m-1" in X_test.columns else 0,
+                    "m-2": X_test["m-2"].iloc[0] if "m-2" in X_test.columns else 0,
+                    "ma3": X_test["ma3"].iloc[0] if "ma3" in X_test.columns else 0,
+                    "so_nw_ct": y_test.iloc[0],
+                    "pred": pred[0]
+                })
+            else:
+                rs_rows.append({
+                    "key": key, "periods": test_period_str,
+                    "m-0":0,"m-1":0,"m-2":0,"ma3":0,"so_nw_ct":0,"pred":0
+                })
+        else:
+            rs_rows.append({
+                "key": key, "periods": test_period_str,
+                "m-0":0,"m-1":0,"m-2":0,"ma3":0,"so_nw_ct":0,"pred":0
+            })
+
+    rs_df = pd.DataFrame(rs_rows)
+    return rs_df
+    
+------------------------------------------------------
+
+# Prepare train_df (pandas) using the same feature construction you used originally
+train_df_pandas = ensure_train_df_from_sofcst(so_fcst_df)  # so_fcst_df must be in memory
+
+# Build jobs (zone by zone, test_periods list)
+jobs = []
+for zone in np.sort(train_df_pandas["zone"].unique()):
+    for test_period in test_period_list:
+        curr_train_df_zone = train_df_pandas[train_df_pandas["zone"] == zone].copy()
+        jobs.append((curr_train_df_zone, test_period))
+
+# run in parallel
+rs_parts = []
+with Pool(n_cpus) as pool:
+    for res in pool.imap_unordered(run_zone_forecasting_lr_1y, jobs, chunksize=1):
+        rs_parts.append(res)
+
+rs_df_1y = pd.concat(rs_parts, ignore_index=True)
+
+# compute errors and mape as in your main pipeline
+rs_with_error_1y = pl.from_pandas(rs_df_1y).with_columns(
+    (pl.col("pred") - pl.col("so_nw_ct")).alias("re"),
+    (pl.col("pred") - pl.col("so_nw_ct")).abs().alias("ae")
+).with_columns(
+    pl.when(pl.col("so_nw_ct") > 0).then(pl.col("ae")/pl.col("so_nw_ct")).otherwise(1).alias("mape")
+).with_columns(
+    pl.when(pl.col("mape") > 1).then(1).otherwise(pl.col("mape")).alias("mape")
+)
+
+# pivot to produce perform_df and save both
+perform_1y = rs_with_error_1y.pivot(on="periods", index="key", values="mape", aggregate_function="sum", sort_columns=True)
+perform_1y = perform_1y.with_columns(mape_avg=perform_1y.drop("key").mean_horizontal())
+
+rs_with_error_1y.write_csv("rs_with_error_LR_1y.csv")
+perform_1y.write_csv("perform_LR_1y.csv")
+
+print("Saved rs_with_error_LR_1y.csv and perform_LR_1y.csv")
+
+------------------------------------------------------
+
+def oversample_train_df(train_df_pandas, min_total_qty=None, multiplier=5):
+    """
+    Arguments:
+      train_df_pandas: pandas DataFrame same format as used above (periods "YYYY MM", key, so_nw_ct, m-0 etc)
+      min_total_qty: if None, set to median total_qty across keys (in provided train_df_pandas)
+      multiplier: duplicate factor for keys below threshold (integer)
+    Returns:
+      pandas DataFrame with oversampled rows (rows duplicated)
+    """
+    agg = train_df_pandas.groupby("key")["so_nw_ct"].sum().rename("total_qty").reset_index()
+    if min_total_qty is None:
+        min_total_qty = agg["total_qty"].median()
+
+    low_keys = agg.loc[agg["total_qty"] < min_total_qty, "key"].tolist()
+    high_keys = agg.loc[agg["total_qty"] >= min_total_qty, "key"].tolist()
+
+    # start with full data, then append duplicates for low_keys
+    oversampled = [train_df_pandas]
+    for k in low_keys:
+        df_k = train_df_pandas[train_df_pandas["key"] == k]
+        # replicate 'multiplier - 1' extra times (i.e., total multiplier)
+        if df_k.shape[0] > 0:
+            for _ in range(multiplier - 1):
+                oversampled.append(df_k.copy())
+    result = pd.concat(oversampled, ignore_index=True)
+    return result
+
+------------------------------------------------------
+
+def run_zone_forecasting_lr_1y_oversample(args):
+    # similar to run_zone_forecasting_lr_1y but oversamples per job before training
+    train_df, test_period = args
+    # compute sliding bounds
+    max_train_period = (test_period - relativedelta(months=3)).strftime("%Y %m")
+    min_train_period = (test_period - relativedelta(months=12)).strftime("%Y %m")
+    test_period_str = test_period.strftime("%Y %m")
+
+    # filter to 1y window
+    curr_train_df = train_df.loc[(train_df["periods"] <= max_train_period) & (train_df["periods"] >= min_train_period)]
+
+    # oversample training rows for low-volume keys (use multiplier 4 by default)
+    curr_train_df_os = oversample_train_df(curr_train_df, min_total_qty=None, multiplier=4)
+
+    curr_test_df = train_df.loc[train_df["periods"] == test_period_str]
+
+    rs_rows = []
+    for key in np.sort(train_df["key"].unique()):
+        curr_train_df_ = curr_train_df_os.loc[(curr_train_df_os["key"] == key) & (curr_train_df_os["periods"] <= max_train_period)].drop(["key","periods"], axis=1)
+
+        if len(curr_train_df_) > 0:
+            curr_test_df_ = curr_test_df.loc[(curr_test_df["key"] == key) & (curr_test_df["periods"] == test_period_str)].drop(["key","periods"], axis=1)
+            if curr_test_df_.shape[0] == 0:
+                rs_rows.append({
+                    "key": key, "periods": test_period_str,
+                    "m-0":0,"m-1":0,"m-2":0,"ma3":0,"so_nw_ct":0,"pred":0
+                })
+                continue
+
+            if curr_test_df_.iloc[0]["ma3"] > 0:
+                X_train = curr_train_df_.drop("so_nw_ct", axis=1)
+                y_train = curr_train_df_["so_nw_ct"]
+                X_test = curr_test_df_.drop("so_nw_ct", axis=1)
+                y_test = curr_test_df_["so_nw_ct"]
+
+                model = LinearRegression()
+                model.fit(X_train, y_train)
+                pred = model.predict(X_test)
+
+                rs_rows.append({
+                    "key": key,
+                    "periods": test_period_str,
+                    "m-0": X_test["m-0"].iloc[0] if "m-0" in X_test.columns else 0,
+                    "m-1": X_test["m-1"].iloc[0] if "m-1" in X_test.columns else 0,
+                    "m-2": X_test["m-2"].iloc[0] if "m-2" in X_test.columns else 0,
+                    "ma3": X_test["ma3"].iloc[0] if "ma3" in X_test.columns else 0,
+                    "so_nw_ct": y_test.iloc[0],
+                    "pred": pred[0]
+                })
+            else:
+                rs_rows.append({
+                    "key": key, "periods": test_period_str,
+                    "m-0":0,"m-1":0,"m-2":0,"ma3":0,"so_nw_ct":0,"pred":0
+                })
+        else:
+            rs_rows.append({
+                "key": key, "periods": test_period_str,
+                "m-0":0,"m-1":0,"m-2":0,"ma3":0,"so_nw_ct":0,"pred":0
+            })
+
+    return pd.DataFrame(rs_rows)
+
+------------------------------------------------------
+
+# prepare same train dataframe (pandas)
+train_df_pandas = ensure_train_df_from_sofcst(so_fcst_df)
+
+jobs = []
+for zone in np.sort(train_df_pandas["zone"].unique()):
+    for test_period in test_period_list:
+        curr_train_df_zone = train_df_pandas[train_df_pandas["zone"] == zone].copy()
+        jobs.append((curr_train_df_zone, test_period))
+
+rs_parts_os = []
+with Pool(n_cpus) as pool:
+    for res in pool.imap_unordered(run_zone_forecasting_lr_1y_oversample, jobs, chunksize=1):
+        rs_parts_os.append(res)
+
+rs_df_1y_os = pd.concat(rs_parts_os, ignore_index=True)
+
+# compute errors and pivot as before
+rs_with_error_1y_os = pl.from_pandas(rs_df_1y_os).with_columns(
+    (pl.col("pred") - pl.col("so_nw_ct")).alias("re"),
+    (pl.col("pred") - pl.col("so_nw_ct")).abs().alias("ae")
+).with_columns(
+    pl.when(pl.col("so_nw_ct") > 0).then(pl.col("ae")/pl.col("so_nw_ct")).otherwise(1).alias("mape")
+).with_columns(
+    pl.when(pl.col("mape") > 1).then(1).otherwise(pl.col("mape")).alias("mape")
+)
+
+perform_1y_os = rs_with_error_1y_os.pivot(on="periods", index="key", values="mape", aggregate_function="sum", sort_columns=True)
+perform_1y_os = perform_1y_os.with_columns(mape_avg=perform_1y_os.drop("key").mean_horizontal())
+
+rs_with_error_1y_os.write_csv("rs_with_error_LR_1y_oversample.csv")
+perform_1y_os.write_csv("perform_LR_1y_oversample.csv")
+
+print("Saved rs_with_error_LR_1y_oversample.csv and perform_LR_1y_oversample.csv")
+
+------------------------------------------------------
+
+# load existing main run perform file (if you saved it earlier)
+# replace names if different
+perf_main = pl.read_csv("perform_lr.csv") if Path("perform_lr.csv").exists() else None
+perf_1y = pl.read_csv("perform_LR_1y.csv")
+perf_1y_os = pl.read_csv("perform_LR_1y_oversample.csv")
+
+def avg_mape_for_runs(df_pol):
+    # find mean of mape_avg column if exists else compute
+    if "mape_avg" in df_pol.columns:
+        return float(df_pol["mape_avg"].mean())
+    else:
+        # compute mean across numeric columns (drop key)
+        return float(df_pol.drop("key").mean_horizontal().mean())
+
+print("Average MAPE (main) : ", avg_mape_for_runs(perf_main) if perf_main is not None else "N/A")
+print("Average MAPE (1y)   : ", avg_mape_for_runs(perf_1y))
+print("Average MAPE (1y_os): ", avg_mape_for_runs(perf_1y_os))
+
+------------------------------------------------------
+------------------------------------------------------
+
+def run_zone_forecasting_lr_full_oversample(args):
+    train_df, test_period = args
+
+    max_train_period = (test_period - relativedelta(months=3)).strftime("%Y %m")
+    test_period_str = test_period.strftime("%Y %m")
+
+    # FULL history up to max_train_period (this is the key difference vs 1y)
+    curr_train_df = train_df.loc[train_df["periods"] <= max_train_period]
+
+    # oversample low-volume keys using full-history training data
+    curr_train_df_os = oversample_train_df(
+        curr_train_df,
+        min_total_qty=None,   # median-based threshold
+        multiplier=4          # keep same multiplier as 1y_os for consistency
+    )
+
+    curr_test_df = train_df.loc[train_df["periods"] == test_period_str]
+
+    rs_rows = []
+    for key in np.sort(train_df["key"].unique()):
+        curr_train_df_ = (
+            curr_train_df_os
+            .loc[curr_train_df_os["key"] == key]
+            .drop(["key","periods"], axis=1)
+        )
+
+        if len(curr_train_df_) > 0:
+            curr_test_df_ = (
+                curr_test_df
+                .loc[curr_test_df["key"] == key]
+                .drop(["key","periods"], axis=1)
+            )
+
+            if curr_test_df_.shape[0] == 0:
+                rs_rows.append({
+                    "key": key, "periods": test_period_str,
+                    "m-0":0,"m-1":0,"m-2":0,"ma3":0,"so_nw_ct":0,"pred":0
+                })
+                continue
+
+            if curr_test_df_.iloc[0]["ma3"] > 0:
+                X_train = curr_train_df_.drop("so_nw_ct", axis=1)
+                y_train = curr_train_df_["so_nw_ct"]
+                X_test = curr_test_df_.drop("so_nw_ct", axis=1)
+                y_test = curr_test_df_["so_nw_ct"]
+
+                model = LinearRegression()
+                model.fit(X_train, y_train)
+                pred = model.predict(X_test)
+
+                rs_rows.append({
+                    "key": key,
+                    "periods": test_period_str,
+                    "m-0": X_test["m-0"].iloc[0],
+                    "m-1": X_test["m-1"].iloc[0],
+                    "m-2": X_test["m-2"].iloc[0],
+                    "ma3": X_test["ma3"].iloc[0],
+                    "so_nw_ct": y_test.iloc[0],
+                    "pred": pred[0]
+                })
+            else:
+                rs_rows.append({
+                    "key": key, "periods": test_period_str,
+                    "m-0":0,"m-1":0,"m-2":0,"ma3":0,"so_nw_ct":0,"pred":0
+                })
+        else:
+            rs_rows.append({
+                "key": key, "periods": test_period_str,
+                "m-0":0,"m-1":0,"m-2":0,"ma3":0,"so_nw_ct":0,"pred":0
+            })
+
+    return pd.DataFrame(rs_rows)
+
+------------------------------------------------------
+
+# reuse the SAME prepared training dataframe
+train_df_pandas = ensure_train_df_from_sofcst(so_fcst_df)
+
+jobs = []
+for zone in np.sort(train_df_pandas["zone"].unique()):
+    for test_period in test_period_list:
+        curr_train_df_zone = train_df_pandas[train_df_pandas["zone"] == zone].copy()
+        jobs.append((curr_train_df_zone, test_period))
+
+rs_parts_full_os = []
+with Pool(n_cpus) as pool:
+    for res in pool.imap_unordered(run_zone_forecasting_lr_full_oversample, jobs, chunksize=1):
+        rs_parts_full_os.append(res)
+
+rs_df_full_os = pd.concat(rs_parts_full_os, ignore_index=True)
+
+------------------------------------------------------
+
+rs_with_error_full_os = pl.from_pandas(rs_df_full_os).with_columns(
+    (pl.col("pred") - pl.col("so_nw_ct")).alias("re"),
+    (pl.col("pred") - pl.col("so_nw_ct")).abs().alias("ae")
+).with_columns(
+    pl.when(pl.col("so_nw_ct") > 0)
+      .then(pl.col("ae") / pl.col("so_nw_ct"))
+      .otherwise(1)
+      .alias("mape")
+).with_columns(
+    pl.when(pl.col("mape") > 1).then(1).otherwise(pl.col("mape")).alias("mape")
+)
+
+perform_full_os = rs_with_error_full_os.pivot(
+    on="periods",
+    index="key",
+    values="mape",
+    aggregate_function="sum",
+    sort_columns=True
+)
+
+perform_full_os = perform_full_os.with_columns(
+    mape_avg=perform_full_os.drop("key").mean_horizontal()
+)
+
+rs_with_error_full_os.write_csv("rs_with_error_LR_full_oversample.csv")
+perform_full_os.write_csv("perform_LR_full_oversample.csv")
+
+print("Saved rs_with_error_LR_full_oversample.csv and perform_LR_full_oversample.csv")
