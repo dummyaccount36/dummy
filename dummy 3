@@ -411,10 +411,30 @@ perform_df.write_csv("perform_LR_1yr_oversample.csv")
 
 -----------------------------------------------------------------------------------------
 
+baseline = pl.read_csv("perform_lr.csv")
+one_year = pl.read_csv("perform_LR_1yr.csv")
+
+diff = baseline.join(one_year, on="key", suffix="_1yr")
+diff = diff.with_columns(
+    delta = pl.col("mape_avg_1yr") - pl.col("mape_avg")
+)
+
+diff.select("delta").describe()
 
 
 -----------------------------------------------------------------------------------------
 
+import pandas as pd
+import matplotlib.pyplot as plt
+
+baseline = pd.read_csv("rs_with_error_lr.csv")
+
+plt.figure()
+plt.plot(baseline["actual"])
+plt.plot(baseline["prediction"])
+plt.title("Baseline LR: Actual vs Prediction")
+plt.legend(["Actual", "Prediction"])
+plt.show()
 
 
 -----------------------------------------------------------------------------------------
