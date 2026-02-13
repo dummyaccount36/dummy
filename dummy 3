@@ -102,7 +102,147 @@ compare_summary.write_csv("lr_compare_summary.csv")
 
 -----------------------------------------------------------------------------------------
 
+# cell 1,
+def restrict_last_n_months(df, max_period, n_months):
+    periods = (
+        pd.to_datetime(df["periods"], format="%Y %m")
+        .sort_values()
+        .unique()
+    )
+    max_p = pd.to_datetime(max_period, format="%Y %m")
+    valid_periods = periods[periods <= max_p][-n_months:]
+    valid_periods_str = [p.strftime("%Y %m") for p in valid_periods]
+    return df.loc[df["periods"].isin(valid_periods_str)]
 
+# cell 2
+def oversample_training_df(df):
+    df_nonzero = df[df["so_nw_ct"] > 0]
+    if df_nonzero.empty:
+        return df
+
+    median_qty = df_nonzero["so_nw_ct"].median()
+    low_mask = df["so_nw_ct"] < median_qty
+
+    df_low = df[low_mask]
+    df_high = df[~low_mask]
+
+    if df_low.empty:
+        return df
+
+    repeat_factor = max(1, int(len(df_high) / len(df_low)))
+    df_low_os = pd.concat([df_low] * repeat_factor, ignore_index=True)
+
+    return pd.concat([df_high, df_low_os], ignore_index=True)
+
+# cell 3
+def run_lr_1year(jobs):
+    rs_df = []
+
+    for train_df, test_period in jobs:
+        max_train_period = (test_period - relativedelta(months=3)).strftime("%Y %m")
+        train_df_1y = restrict_last_n_months(train_df, max_train_period, 12)
+
+        rs_df.append(
+            run_zone_forecasting_lr((train_df_1y, test_period))
+        )
+
+    return pd.concat(rs_df, ignore_index=True)
+
+rs_lr_1y = run_lr_1year(jobs)
+pl.from_pandas(rs_lr_1y).write_csv("rs_with_error_lr_1y.csv")
+
+# cell 4
+def run_lr_os(jobs):
+    rs_df = []
+
+    for train_df, test_period in jobs:
+        train_df_os = oversample_training_df(train_df)
+
+        rs_df.append(
+            run_zone_forecasting_lr((train_df_os, test_period))
+        )
+
+    return pd.concat(rs_df, ignore_index=True)
+
+
+rs_lr_os = run_lr_os(jobs)
+pl.from_pandas(rs_lr_os).write_csv("rs_with_error_lr_os.csv")
+
+# cell 5
+def run_lr_1y_os(jobs):
+    rs_df = []
+
+    for train_df, test_period in jobs:
+        max_train_period = (test_period - relativedelta(months=3)).strftime("%Y %m")
+        train_df_1y = restrict_last_n_months(train_df, max_train_period, 12)
+        train_df_os = oversample_training_df(train_df_1y)
+
+        rs_df.append(
+            run_zone_forecasting_lr((train_df_os, test_period))
+        )
+
+    return pd.concat(rs_df, ignore_index=True)
+
+
+rs_lr_1y_os = run_lr_1y_os(jobs)
+pl.from_pandas(rs_lr_1y_os).write_csv("rs_with_error_lr_1y_os.csv")
+
+# cell 6
+def build_performance(rs_df, pareto_df):
+    rs_with_error_df = pl.from_pandas(rs_df).with_columns(
+        re=pl.col("pred") - pl.col("so_nw_ct"),
+        ae=(pl.col("pred") - pl.col("so_nw_ct")).abs()
+    ).with_columns(
+        mape=pl.when(pl.col("so_nw_ct") > 0)
+              .then(pl.col("ae") / pl.col("so_nw_ct"))
+              .otherwise(1)
+    ).with_columns(
+        mape=pl.when(pl.col("mape") > 1).then(1).otherwise(pl.col("mape"))
+    )
+
+    perform_df = rs_with_error_df.pivot(
+        on="periods",
+        index="key",
+        values="mape",
+        aggregate_function="sum",
+        sort_columns=True
+    )
+
+    # compute horizontal mean explicitly from the dataframe (safer)
+    perform_df = perform_df.with_columns(
+        mape_avg = perform_df.drop("key").mean_horizontal(),
+        pareto80_flag = pl.col("key").is_in(pareto_df["key"]).cast(pl.Int8),
+        zone = pl.col("key").str.split("_").list.get(0)
+    )
+
+
+    return rs_with_error_df, perform_df
+
+# cell 7
+rs_base_err, perf_base = build_performance(rs_df, pareto_df)
+rs_1y_err, perf_1y = build_performance(rs_lr_1y, pareto_df)
+rs_os_err, perf_os = build_performance(rs_lr_os, pareto_df)
+rs_1y_os_err, perf_1y_os = build_performance(rs_lr_1y_os, pareto_df)
+
+perf_base = perf_base.with_columns(model=pl.lit("baseline"))
+perf_1y = perf_1y.with_columns(model=pl.lit("1_year"))
+perf_os = perf_os.with_columns(model=pl.lit("oversampling"))
+perf_1y_os = perf_1y_os.with_columns(model=pl.lit("1_year_oversampling"))
+
+compare_df = pl.concat([
+    perf_base,
+    perf_1y,
+    perf_os,
+    perf_1y_os
+])
+
+compare_summary = compare_df.group_by("model").agg(
+    pl.mean("mape_avg").alias("mean_mape"),
+    pl.median("mape_avg").alias("median_mape")
+)
+
+compare_df.write_csv("lr_compare_by_key.csv")
+compare_summary.write_csv("lr_compare_summary.csv")
 
 -----------------------------------------------------------------------------------------
 
