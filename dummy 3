@@ -246,6 +246,23 @@ compare_summary.write_csv("lr_compare_summary.csv")
 
 -----------------------------------------------------------------------------------------
 
+def run_lr_1year(jobs):
+    rs_df = []
+
+    for train_df, test_period in jobs:
+        max_train_period = (test_period - relativedelta(months=3)).strftime("%Y %m")
+        test_period_str = test_period.strftime("%Y %m")
+
+        train_df_1y = restrict_last_n_months(train_df, max_train_period, 12)
+
+        if not (train_df_1y["periods"] == test_period_str).any():
+            continue
+
+        rs_df.append(
+            run_zone_forecasting_lr((train_df_1y, test_period))
+        )
+
+    return pd.concat(rs_df, ignore_index=True)
 
 
 -----------------------------------------------------------------------------------------
